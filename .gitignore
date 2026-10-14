@@ -1,0 +1,4 @@
+out/
+*.log
+*.dmp
+Thumbs.db

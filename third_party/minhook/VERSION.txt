@@ -1,0 +1,1 @@
+MinHook v1.3.4 (commit c3fcafdc10146beb5919319d0683e44e3c30d537) from https://github.com/TsudaKageyu/minhook. Only include/ and src/ vendored, unmodified. BSD-2, see LICENSE.txt.

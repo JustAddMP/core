@@ -1,0 +1,19 @@
+; Exports of the version.dll proxy, same names and ordinals as Windows' version.dll (10.0.26200).
+EXPORTS
+    GetFileVersionInfoA = mc_GetFileVersionInfoA @1
+    GetFileVersionInfoByHandle = mc_GetFileVersionInfoByHandle @2
+    GetFileVersionInfoExA = mc_GetFileVersionInfoExA @3
+    GetFileVersionInfoExW = mc_GetFileVersionInfoExW @4
+    GetFileVersionInfoSizeA = mc_GetFileVersionInfoSizeA @5
+    GetFileVersionInfoSizeExA = mc_GetFileVersionInfoSizeExA @6
+    GetFileVersionInfoSizeExW = mc_GetFileVersionInfoSizeExW @7
+    GetFileVersionInfoSizeW = mc_GetFileVersionInfoSizeW @8
+    GetFileVersionInfoW = mc_GetFileVersionInfoW @9
+    VerFindFileA = mc_VerFindFileA @10
+    VerFindFileW = mc_VerFindFileW @11
+    VerInstallFileA = mc_VerInstallFileA @12
+    VerInstallFileW = mc_VerInstallFileW @13
+    VerLanguageNameA = mc_VerLanguageNameA @14
+    VerLanguageNameW = mc_VerLanguageNameW @15
+    VerQueryValueA = mc_VerQueryValueA @16
+    VerQueryValueW = mc_VerQueryValueW @17
