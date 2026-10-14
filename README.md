@@ -6,6 +6,10 @@ handler, logging, MinHook hooks, Present hook + D3D11 overlay, Steam P2P / UDP n
 session, Steam lobbies and invites, the co-op panels and banners, and a Scaleform (SWF/AVM2) patcher for native menu
 entries.
 
+It is not tied to one game or series: it works for any 64-bit Windows game that renders with Direct3D 11
+(Steam optional: without it players join by IP). Games on Direct3D 12 or Vulkan need another Present hook, and
+32-bit games a 32-bit build.
+
 Everything game-specific lives in a game repo that includes this one as a git submodule, e.g.
 [JustAddMP/MafiaDE](https://github.com/JustAddMP/MafiaDE). A game provides:
 
