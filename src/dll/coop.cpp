@@ -3,6 +3,7 @@
 #include "core/compat.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "dll/pending_join.h"
 #include "mc/game_module.h"
 #include "net/multi_transport.h"
 #include "net/session.h"
@@ -96,6 +97,8 @@ struct State {
     bool requireInvitePassword = false;  // Steam lobby members need it too
     bool passwordPrompt = false;     // a join was refused for the password; the UI asks (PopPasswordPrompt)
     Mode retryMode = Mode::None;     // the join that was refused (JoinUdp: address, JoinLobby: lobbyId)
+
+    PendingJoin pendingJoin;  // Steam join request, recorded by the callback, acted on by Tick (pending_join.h)
 };
 
 State& S() {
@@ -319,16 +322,25 @@ void StartLobbyJoin(uint64_t lobbyId) {
     if (!s.lobby.Join(lobbyId)) Fail("could not join Steam lobby " + std::to_string(lobbyId));
 }
 
-// Invite accepted in the overlay / "Join Game" in the friends list while the game runs.
+// Invite accepted in the overlay / "Join Game" in the friends list while the game runs. Called from a Steam
+// callback, which can run inside Session::Poll (SteamTransport::Poll pumps callbacks): only record the lobby id here;
+// HandleJoinRequest acts on it at the start of the next Tick.
 void OnJoinRequested(uint64_t lobbyId) {
-    State& s = S();
     MC_LOG_INFO("coop: join requested from Steam for lobby %llu", static_cast<unsigned long long>(lobbyId));
-    Notify("CO-OP", "Joining your friend's game...");
+    S().pendingJoin.Post(lobbyId);
+}
+
+// Tick, after Steam polling and before the session is polled: no session or transport code is on the stack.
+void HandleJoinRequest() {
+    State& s = S();
+    const uint64_t lobbyId = s.pendingJoin.Take();
+    if (!lobbyId) return;
     if (s.mode == Mode::JoinLobby && s.lobbyId == lobbyId &&
         (s.session || s.lobby.GetState() != net::SteamLobby::State::Idle)) {
-        MC_LOG_INFO("coop: already in or joining that lobby");
+        MC_LOG_INFO("coop: already in or joining lobby %llu", static_cast<unsigned long long>(lobbyId));
         return;
     }
+    Notify("CO-OP", "Joining your friend's game...");
     if (s.session) {
         MC_LOG_INFO("coop: leaving the current session to follow the invite");
         GetGameModule().OnSessionEnd();
@@ -336,6 +348,7 @@ void OnJoinRequested(uint64_t lobbyId) {
         s.session.reset();
         s.net.reset();
     }
+    s.teardown = false;  // the old session is gone; a teardown it requested must not end the new join
     StartLobbyJoin(lobbyId);  // SteamLobby::Join leaves a lobby we host
 }
 
@@ -531,6 +544,7 @@ void Coop::Tick(float dt) {
     State& s = S();
     s.now += dt;
     PollSteam();
+    HandleJoinRequest();
     if (!s.started) TryStart();
     if (s.session) s.session->Poll();
     if (s.session) GetGameModule().SessionTick(dt);

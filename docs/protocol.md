@@ -228,7 +228,9 @@ new peer dropped). Guests use a single transport.
 - Invite accepted from the overlay -> `GameLobbyJoinRequested_t` (333). "Join Game" while running ->
   `GameRichPresenceJoinRequested_t` (337) with the connect string. Game started by Steam via "Join Game" ->
   `+connect_lobby <id>` on the command line (`SteamLobby::CommandLineLobby()`). All three call `onJoinRequested`
-  (default: `Join`).
+  (default: `Join`). The callbacks can fire inside `SteamTransport::Poll` (it pumps Steam callbacks), i.e. inside
+  `Session::Poll`, so the dll's handler only records the lobby id; `Coop::Tick` leaves the current session and joins
+  at the start of the next tick, after Steam polling and before the session is polled.
 - `Join(id)` -> `LobbyEnter_t` -> host SteamID = lobby data `mc_host` (fallback: lobby owner) ->
   `SteamTransport::Connect(hostSteamId)`.
 

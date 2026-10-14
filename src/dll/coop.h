@@ -15,7 +15,8 @@
 // steam_api64.dll, call its SteamAPI_Init a few seconds after the first frame and pump its SteamAPI_RunCallbacks
 // ourselves every frame.
 // Accepting a Steam invite (or "Join Game" in the friends list) while the game runs leaves the current session and
-// joins the inviting host.
+// joins the inviting host. The Steam callback only records the lobby id (dll/pending_join.h); Tick acts on it at the
+// start of the next frame, so the session is never torn down while it is being polled.
 #include "render/overlay.h"
 
 #include <cstdint>

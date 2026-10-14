@@ -48,7 +48,8 @@ src/
                           inject, pass --key value as <envPrefix>KEY), install (--install / --uninstall of the proxy)
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
-tests/                    net_loopback, net_password, net_interest, net_fuzz, proxy_test, steam_smoke (manual)
+tests/                    net_loopback, net_password, net_interest, net_fuzz, proxy_test, pending_join,
+                          steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py
 docs/                     ARCHITECTURE.md (this), protocol.md (sessions + transports), interest.md
