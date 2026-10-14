@@ -3,7 +3,7 @@
 // writes them as an 8-bit coverage array. Cell 95 (character 127) is filled solid and used for rectangles.
 // The output header is checked in; nothing is read from font files at runtime.
 //
-// Build + run (x64 Native Tools prompt, from native\):
+// Build + run (x64 Native Tools prompt, from the core repo's root):
 //   cl /nologo /EHsc /std:c++20 /DUNICODE /D_UNICODE tools\fontgen.cpp /Fe:out\fontgen.exe /Fo:out\obj\ gdi32.lib user32.lib
 //   out\fontgen.exe src\render\font8x16.h [face] [pixel height]      (default: Consolas 14)
 #include <windows.h>

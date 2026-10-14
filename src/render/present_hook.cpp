@@ -91,9 +91,9 @@ bool GetSwapChainVtable(void** out, size_t count) {
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"MafiaCoopDxgiProbe";
+    wc.lpszClassName = L"JustAddMPDxgiProbe";
     RegisterClassExW(&wc);
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"MafiaCoop DXGI probe", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64,
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"JustAddMP DXGI probe", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64,
                                 nullptr, nullptr, wc.hInstance, nullptr);
     if (!hwnd) {
         MC_LOG_ERROR("render: probe window creation failed (%lu)", GetLastError());

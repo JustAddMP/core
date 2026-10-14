@@ -2,9 +2,9 @@
 //
 // In every process: loads the real version.dll from the system directory and points the export stubs
 // (version_stubs.asm) at it, so anything that imports version.dll keeps working.
-// Only in mafiadefinitiveedition.exe, and only when MafiaCoop.exe did not start the game (it injects the dll itself):
-// queues an APC on the loading thread that loads mafiacoop.dll from the path in mafiacoop_path.txt next to this file
-// (or mafiacoop.dll next to this file). The game imports version.dll statically, so DllMain runs on the main thread
+// Only in the game exe (GameInfo::gameExe), and only when the launcher did not start the game (it injects the dll
+// itself): queues an APC on the loading thread that loads the mod dll from the path in the pointer file next to this
+// file (or the mod dll next to this file). The game imports version.dll statically, so DllMain runs on the main thread
 // during process initialization and the APC is delivered when the loader finishes, before the game's entry point:
 // the same moment as the launcher's QueueUserAPC injection. Nothing is written anywhere; problems go to
 // OutputDebugString (visible in DebugView) and the game then simply runs without co-op.
@@ -37,7 +37,7 @@ HMODULE _real = nullptr;
 std::wstring _selfDir;
 
 void Debug(const std::wstring& msg) {
-    OutputDebugStringW((L"[MafiaCoop proxy] " + msg + L"\n").c_str());
+    OutputDebugStringW((L"[" + mc::core::AsciiW(mc::GetGameInfo().modName) + L" proxy] " + msg + L"\n").c_str());
 }
 
 std::wstring ModulePath(HMODULE mod) {
@@ -83,7 +83,7 @@ std::wstring Trim(const std::wstring& s) {
     return s.substr(b, s.find_last_not_of(L" \t\r\n") - b + 1);
 }
 
-// The first line of mafiacoop_path.txt that is neither empty nor a '#' comment (UTF-8).
+// The first line of the pointer file that is neither empty nor a '#' comment (UTF-8).
 std::wstring ReadPointer(const std::wstring& file) {
     HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -110,28 +110,30 @@ std::wstring ReadPointer(const std::wstring& file) {
 }
 
 void CALLBACK LoadModApc(ULONG_PTR) {
-    if (GetModuleHandleW(L"mafiacoop.dll")) {  // already in (e.g. an older launcher injected it first)
-        Debug(L"mafiacoop.dll is already loaded; not loading it again");
+    const mc::GameInfo& gi = mc::GetGameInfo();
+    const std::wstring dllName = gi.dllName;
+    if (GetModuleHandleW(gi.dllName)) {  // already in (e.g. an older launcher injected it first)
+        Debug(dllName + L" is already loaded; not loading it again");
         return;
     }
-    std::wstring dll = ReadPointer(_selfDir + L"\\" + mc::proxy::kPointerName);
-    if (dll.empty()) dll = _selfDir + L"\\mafiacoop.dll";
+    std::wstring dll = ReadPointer(_selfDir + L"\\" + mc::proxy::PointerName());
+    if (dll.empty()) dll = _selfDir + L"\\" + dllName;
     if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        Debug(L"mafiacoop.dll not found (" + dll + L"); the game runs without co-op. Run MafiaCoop.exe --install "
-              L"again if the MafiaCoop folder was moved.");
+        Debug(dllName + L" not found (" + dll + L"); the game runs without co-op. Run " + gi.launcherName +
+              L" --install again if the " + mc::core::AsciiW(gi.modName) + L" folder was moved.");
         return;
     }
-    SetEnvironmentVariableW(mc::proxy::kEnvProxy, ModulePath(_self).c_str());  // the dll logs how it was loaded
+    SetEnvironmentVariableW(mc::proxy::EnvProxy().c_str(), ModulePath(_self).c_str());  // the dll logs how it was loaded
     if (!LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH))
         Debug(L"LoadLibrary(" + dll + L") failed, error " + std::to_wstring(GetLastError()));
 }
 
 bool IsGame() {
-    return _wcsicmp(FileName(ModulePath(nullptr)).c_str(), mc::proxy::kGameExe) == 0;
+    return _wcsicmp(FileName(ModulePath(nullptr)).c_str(), mc::proxy::GameExe()) == 0;
 }
 
 bool StartedByLauncher() {
-    return GetEnvironmentVariableW(mc::proxy::kEnvLauncher, nullptr, 0) > 0;
+    return GetEnvironmentVariableW(mc::proxy::EnvLauncher().c_str(), nullptr, 0) > 0;
 }
 
 } // namespace
@@ -148,7 +150,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(module);
         const std::wstring self = ModulePath(module);
         _selfDir = self.substr(0, self.find_last_of(L"\\/"));
-        OutputDebugStringA(mc::proxy::kMarker);  // also keeps the marker bytes the launcher looks for in the file
+        OutputDebugStringA(mc::proxy::Marker());  // also keeps the marker bytes the launcher looks for in the file
         Debug(L"loaded: " + self);
         LoadReal();
         if (IsGame() && !StartedByLauncher()) {

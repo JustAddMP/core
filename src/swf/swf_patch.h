@@ -1,9 +1,9 @@
 #pragma once
-// Patching the game's Flash (Scaleform GFx, AS3) movies at load time. See docs/game-api.md "Menus".
+// Patching Flash (Scaleform GFx, AS3) movies at load time, e.g. a game's menus.
 //
-// The game's menus are AS3 movies (/gui/*.gfx, an uncompressed SWF with a "GFX" signature). Each holds one DoABC
-// tag with the compiled ActionScript. To add menu entries we parse that ABC block, append constants (strings,
-// names) to its constant pool and prepend a few instructions to existing methods, then write the movie back. All
+// Scaleform menus are AS3 movies (*.gfx: an uncompressed SWF with a "GFX" signature). Each holds one DoABC tag with
+// the compiled ActionScript. To add menu entries a game layer parses that ABC block, appends constants (strings,
+// names) to its constant pool and prepends a few instructions to existing methods, then writes the movie back. All
 // existing pool indices, method/class/trait records stay as they were, so the rest of the movie is untouched.
 // Format: Adobe "ActionScript Virtual Machine 2 (AVM2) Overview" (public spec) and the SWF file format spec.
 #include <cstddef>
@@ -13,7 +13,7 @@
 #include <string_view>
 #include <vector>
 
-namespace mc::game::swf {
+namespace mc::swf {
 
 // AVM2 constants we use.
 namespace ns {
@@ -140,4 +140,4 @@ constexpr uint8_t kLabel = 0x09, kIfNlt = 0x0C, kJump = 0x10, kIfTrue = 0x11, kI
 // fixed up). False (with *err) when the file is not an uncompressed SWF/GFX, has no DoABC tag, or patch fails.
 bool PatchMovie(std::vector<uint8_t>& movie, const std::function<bool(Abc&, std::string*)>& patch, std::string* err);
 
-}  // namespace mc::game::swf
+}  // namespace mc::swf

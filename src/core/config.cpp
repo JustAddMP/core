@@ -51,14 +51,14 @@ bool Config::Load(const std::wstring& path) {
 }
 
 bool Config::Lookup(const std::string& key, std::string& out) const {
-    std::string envName = "MAFIACOOP_";
+    std::string envName = _envPrefix;
     for (char c : key) {
         envName += (c == '.' || c == '-') ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
     // Wide API + UTF-8: the launcher passes its UTF-16 command line through, and the ini is UTF-8. The ANSI API would
     // turn a non-ASCII --name or --password into codepage bytes (or '?') that match nothing else.
     const std::wstring wname(envName.begin(), envName.end());  // key: ASCII
-    const DWORD need = GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
+    const DWORD need = _envPrefix.empty() ? 0 : GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
     if (need > 1) {
         std::wstring w(need, L'\0');
         const DWORD n = GetEnvironmentVariableW(wname.c_str(), w.data(), need);

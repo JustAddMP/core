@@ -1,4 +1,4 @@
-// MafiaCoop net: transport interface (see docs/ARCHITECTURE.md "Networking" and docs/protocol.md).
+// net: transport interface (see docs/ARCHITECTURE.md "Networking" and docs/protocol.md).
 // Single-threaded and non-blocking: every call, and every event, happens on the thread that calls Poll().
 #pragma once
 #include <cstdint>

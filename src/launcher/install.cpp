@@ -1,6 +1,7 @@
-// MafiaCoop.exe --install / --uninstall (see install.h and src/proxy/proxy_shared.h).
+// Launcher --install / --uninstall (see install.h and src/proxy/proxy_shared.h).
 #include "launcher/install.h"
 
+#include "core/names.h"
 #include "proxy/proxy_shared.h"
 
 #include <windows.h>
@@ -18,6 +19,11 @@ namespace {
 using namespace mc::proxy;
 
 constexpr int kOk = 0, kError = 1, kRefused = 3;
+
+// Descriptor strings for messages.
+std::wstring Mod() { return core::AsciiW(GetGameInfo().modName); }
+std::wstring Launcher() { return GetGameInfo().launcherName; }
+std::wstring DllName() { return GetGameInfo().dllName; }
 
 bool IsFile(const std::wstring& p) {
     const DWORD a = GetFileAttributesW(p.c_str());
@@ -42,13 +48,13 @@ bool Contains(const std::vector<char>& data, const char* needle) {
 }
 
 bool IsOurProxy(const std::wstring& path) {
-    return Contains(ReadAll(path), kMarker);
+    return Contains(ReadAll(path), Marker());
 }
 
 bool IsOurPointer(const std::wstring& path) {
     const std::vector<char> d = ReadAll(path);
-    const size_t n = std::strlen(kPointerHeader);
-    return d.size() >= n && std::memcmp(d.data(), kPointerHeader, n) == 0;
+    const std::string header = PointerHeader();
+    return d.size() >= header.size() && std::memcmp(d.data(), header.data(), header.size()) == 0;
 }
 
 std::wstring ErrorText(DWORD err) {
@@ -68,18 +74,18 @@ std::wstring GameDir(const std::wstring& exeOrDir) {
     while (!p.empty() && p.back() == L'\\') p.pop_back();
     const size_t slash = p.find_last_of(L'\\');
     const std::wstring last = slash == std::wstring::npos ? p : p.substr(slash + 1);
-    if (_wcsicmp(last.c_str(), kGameExe) == 0) p = slash == std::wstring::npos ? L"." : p.substr(0, slash);
+    if (_wcsicmp(last.c_str(), GameExe()) == 0) p = slash == std::wstring::npos ? L"." : p.substr(0, slash);
     return p;
 }
 
-// A running mafiadefinitiveedition.exe started from this folder (it would have version.dll loaded).
+// A running game exe started from this folder (it would have version.dll loaded).
 bool GameRunningFrom(const std::wstring& dir) {
     bool found = false;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
     PROCESSENTRY32W pe{sizeof(pe)};
     for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe)) {
-        if (_wcsicmp(pe.szExeFile, kGameExe) != 0) continue;
+        if (_wcsicmp(pe.szExeFile, GameExe()) != 0) continue;
         HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
         if (!h) continue;
         wchar_t path[1024];
@@ -102,17 +108,17 @@ struct Reporter {
         if (io.console)
             io.print(L"ERROR: " + s);
         else
-            MessageBoxW(nullptr, s.c_str(), L"MafiaCoop", (code == kRefused ? MB_ICONWARNING : MB_ICONERROR) | MB_OK);
+            MessageBoxW(nullptr, s.c_str(), Mod().c_str(), (code == kRefused ? MB_ICONWARNING : MB_ICONERROR) | MB_OK);
         return code;
     }
     void Done(const std::wstring& s) const {
         Line(s);
-        if (!io.console) MessageBoxW(nullptr, s.c_str(), L"MafiaCoop", MB_ICONINFORMATION | MB_OK);
+        if (!io.console) MessageBoxW(nullptr, s.c_str(), Mod().c_str(), MB_ICONINFORMATION | MB_OK);
     }
     bool Confirm(const std::wstring& s) const {
         io.log(L"confirm: " + s);
         if (io.console) return true;  // --yes
-        return MessageBoxW(nullptr, s.c_str(), L"MafiaCoop", MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) == IDYES;
+        return MessageBoxW(nullptr, s.c_str(), Mod().c_str(), MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) == IDYES;
     }
 };
 
@@ -121,28 +127,29 @@ struct Reporter {
 int InstallProxy(const std::wstring& gameExeOrDir, const std::wstring& selfDir, const InstallIo& io) {
     const Reporter r{io};
     const std::wstring dir = GameDir(gameExeOrDir);
-    const std::wstring gameExe = dir + L"\\" + kGameExe;
-    const std::wstring proxySrc = selfDir + L"\\" + kBuiltName;
-    const std::wstring dll = selfDir + L"\\mafiacoop.dll";
+    const std::wstring gameExe = dir + L"\\" + GameExe();
+    const std::wstring proxySrc = selfDir + L"\\" + BuiltName();
+    const std::wstring dll = selfDir + L"\\" + DllName();
     const std::wstring target = dir + L"\\" + kInstalledName;
-    const std::wstring pointer = dir + L"\\" + kPointerName;
+    const std::wstring pointer = dir + L"\\" + PointerName();
+    const std::wstring mod = Mod(), launcher = Launcher();
     r.Line(L"install: game folder " + dir);
 
-    if (!IsFile(gameExe)) return r.Error(L"Not a game folder (no " + std::wstring(kGameExe) + L"):\n" + dir);
-    if (!IsFile(proxySrc)) return r.Error(L"Missing " + proxySrc + L" (it ships next to MafiaCoop.exe).");
+    if (!IsFile(gameExe)) return r.Error(L"Not a game folder (no " + std::wstring(GameExe()) + L"):\n" + dir);
+    if (!IsFile(proxySrc)) return r.Error(L"Missing " + proxySrc + L" (it ships next to " + launcher + L").");
     if (!IsFile(dll)) return r.Error(L"Missing " + dll + L".");
 
     const bool update = IsFile(target) && IsOurProxy(target);
     if (Exists(target) && !update) {
         return r.Error(L"The game folder already has a " + std::wstring(kInstalledName) +
-                           L" that is not from MafiaCoop (probably another mod):\n" + target +
-                           L"\n\nMafiaCoop did not change anything. Remove the other mod first, or keep starting the "
-                           L"game with MafiaCoop.exe.",
+                           L" that is not from " + mod + L" (probably another mod):\n" + target + L"\n\n" + mod +
+                           L" did not change anything. Remove the other mod first, or keep starting the game with " +
+                           launcher + L".",
                        kRefused);
     }
     if (Exists(pointer) && !(IsFile(pointer) && IsOurPointer(pointer))) {
-        return r.Error(L"The game folder already has a " + std::wstring(kPointerName) +
-                           L" that is not from MafiaCoop:\n" + pointer + L"\n\nMafiaCoop did not change anything.",
+        return r.Error(L"The game folder already has a " + std::wstring(PointerName()) + L" that is not from " + mod +
+                           L":\n" + pointer + L"\n\n" + mod + L" did not change anything.",
                        kRefused);
     }
     if (GameRunningFrom(dir)) return r.Error(L"The game is running. Close it and try again.", kRefused);
@@ -152,11 +159,12 @@ int InstallProxy(const std::wstring& gameExeOrDir, const std::wstring& selfDir, 
         L" \"start from Steam\" mode?\n\n"
         L"This writes two files into the game folder:\n\n    " + target +
         L"\n        a small loader. The game loads it at start; it passes everything on to Windows' own version.dll "
-        L"and loads MafiaCoop.\n\n    " + pointer + L"\n        one line: where MafiaCoop is:\n        " + dll +
-        L"\n\nNo other game file is changed. Afterwards the game started from Steam (or its exe) has co-op; keep this "
-        L"MafiaCoop folder where it is (or run --install again after moving it). Settings come from MafiaCoop.ini "
-        L"next to mafiacoop.dll.\n\nTo remove: run MafiaCoop.exe --uninstall, or delete those two files. "
-        L"Steam's \"Verify integrity of game files\" does not remove them.\n\nContinue?";
+        L"and loads " + mod + L".\n\n    " + pointer + L"\n        one line: where " + mod + L" is:\n        " + dll +
+        L"\n\nNo other game file is changed. Afterwards the game started from Steam (or its exe) has co-op; keep this " +
+        mod + L" folder where it is (or run --install again after moving it). Settings come from " +
+        GetGameInfo().iniName + L" next to " + DllName() + L".\n\nTo remove: run " + launcher +
+        L" --uninstall, or delete those two files. Steam's \"Verify integrity of game files\" does not remove them."
+        L"\n\nContinue?";
     if (!r.Confirm(question)) {
         r.Line(L"install: cancelled");
         return kRefused;
@@ -170,14 +178,17 @@ int InstallProxy(const std::wstring& gameExeOrDir, const std::wstring& selfDir, 
                                                    : L""));
     }
     // UTF-8, header line first (it marks the file as ours), then the path.
-    std::string body = std::string(kPointerHeader) +
-                       ": path of mafiacoop.dll, loaded by version.dll in this folder. Remove both with "
-                       "MafiaCoop.exe --uninstall.\r\n";
-    const int n = WideCharToMultiByte(CP_UTF8, 0, dll.c_str(), static_cast<int>(dll.size()), nullptr, 0, nullptr,
-                                      nullptr);
-    std::string path(static_cast<size_t>(n), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, dll.c_str(), static_cast<int>(dll.size()), path.data(), n, nullptr, nullptr);
-    body += path + "\r\n";
+    auto narrow = [](const std::wstring& w) {
+        const int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr,
+                                            nullptr);
+        std::string s(static_cast<size_t>(len), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), len, nullptr, nullptr);
+        return s;
+    };
+    std::string body = PointerHeader() + ": path of " + narrow(DllName()) +
+                       ", loaded by version.dll in this folder. Remove both with " + narrow(launcher) +
+                       " --uninstall.\r\n";
+    body += narrow(dll) + "\r\n";
     HANDLE f = CreateFileW(pointer.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     DWORD written = 0;
     const bool ok = f != INVALID_HANDLE_VALUE &&
@@ -189,9 +200,9 @@ int InstallProxy(const std::wstring& gameExeOrDir, const std::wstring& selfDir, 
         if (!update) DeleteFileW(target.c_str());  // do not leave a proxy without its pointer behind
         return r.Error(L"Could not write " + pointer + L":\n" + ErrorText(err));
     }
-    r.Done(std::wstring(update ? L"Updated" : L"Installed") + L". Start Mafia: Definitive Edition from Steam to play "
-           L"with co-op.\n\nWritten:\n    " + target + L"\n    " + pointer +
-           L"\n\nRemove with: MafiaCoop.exe --uninstall");
+    r.Done(std::wstring(update ? L"Updated" : L"Installed") + L". Start " + core::AsciiW(GetGameInfo().gameName) +
+           L" from Steam to play with co-op.\n\nWritten:\n    " + target + L"\n    " + pointer +
+           L"\n\nRemove with: " + launcher + L" --uninstall");
     return kOk;
 }
 
@@ -199,7 +210,8 @@ int UninstallProxy(const std::wstring& gameExeOrDir, const InstallIo& io) {
     const Reporter r{io};
     const std::wstring dir = GameDir(gameExeOrDir);
     const std::wstring target = dir + L"\\" + kInstalledName;
-    const std::wstring pointer = dir + L"\\" + kPointerName;
+    const std::wstring pointer = dir + L"\\" + PointerName();
+    const std::wstring mod = Mod();
     r.Line(L"uninstall: game folder " + dir);
 
     const bool proxyOurs = IsFile(target) && IsOurProxy(target);
@@ -209,7 +221,7 @@ int UninstallProxy(const std::wstring& gameExeOrDir, const InstallIo& io) {
     if (Exists(pointer) && !pointerOurs) foreign += L"\n    " + pointer;
     if (!proxyOurs && !pointerOurs) {
         r.Done(L"\"Start from Steam\" mode is not installed in\n    " + dir +
-               (foreign.empty() ? L"" : L"\n\nLeft alone (not from MafiaCoop):" + foreign));
+               (foreign.empty() ? L"" : L"\n\nLeft alone (not from " + mod + L"):" + foreign));
         return kOk;
     }
     if (GameRunningFrom(dir)) return r.Error(L"The game is running. Close it and try again.", kRefused);
@@ -217,7 +229,7 @@ int UninstallProxy(const std::wstring& gameExeOrDir, const InstallIo& io) {
     if (proxyOurs) list += L"\n    " + target;
     if (pointerOurs) list += L"\n    " + pointer;
     if (!r.Confirm(L"Remove \"start from Steam\" mode? This deletes:" + list +
-                   L"\n\nThe game then starts without co-op unless started with MafiaCoop.exe.")) {
+                   L"\n\nThe game then starts without co-op unless started with " + Launcher() + L".")) {
         r.Line(L"uninstall: cancelled");
         return kRefused;
     }
@@ -230,7 +242,7 @@ int UninstallProxy(const std::wstring& gameExeOrDir, const InstallIo& io) {
             failed += L"\n    " + p + L" (" + ErrorText(GetLastError()) + L")";
     }
     if (!failed.empty()) return r.Error(L"Could not delete:" + failed);
-    r.Done(L"Removed:" + list + (foreign.empty() ? L"" : L"\n\nLeft alone (not from MafiaCoop):" + foreign));
+    r.Done(L"Removed:" + list + (foreign.empty() ? L"" : L"\n\nLeft alone (not from " + mod + L"):" + foreign));
     return kOk;
 }
 

@@ -104,11 +104,13 @@ im.Stats(guestId);                          // relevant / due / sent / deferred 
 `SendItem` carries the entity id, the bytes charged, the distance (handy to pick a coarser encoding far away) and
 `first` (the first update since Enter).
 
-## Integration
+## Integration (in a game layer; example: MafiaDE)
+
+The manager lives in core; a game's session code drives it. How MafiaDE uses it:
 
 **Player sync (now).** Only players and their cars are replicated today, and those are always relevant and Critical,
 so the manager would only add bookkeeping. `PlayerState` stays a plain 20 Hz `Broadcast`; a `TODO(interest)` comment
-in `PlayerSync::Tick` (`src/game/player_sync.cpp`, where PlayerState is sent) marks the integration point. When the
+in MafiaDE's `PlayerSync::Tick` (`src/game/player_sync.cpp`, where PlayerState is sent) marks the integration point. When the
 host starts streaming other entities, the same tick is where the manager runs.
 
 **Phase 4 NPC / vehicle mirroring (host).**
@@ -123,7 +125,7 @@ host starts streaming other entities, the same tick is where the manager runs.
 3. After `Tick`: for each `Enter`, send that guest a reliable spawn message (model, transform, state) and
    `ChargeBytes` its size; for each `Leave`, a reliable despawn. Then for each guest, pack the states of its
    `SendList` into unreliable messages (several entities per message, under the MTU) and send them with
-   `SendTo(guest, ...)`; the protocol ids go in the 0x02xx range of protocol.md.
+   `SendTo(guest, ...)`; the protocol ids go in the game's app id range (MafiaDE: 0x02xx).
 4. Guests create puppets on spawn, drive them from interpolated snapshots like player puppets (the snapshot
    timestamp makes uneven update rates harmless: a far NPC updated every 0.5 s just interpolates over a longer
    gap), and remove them on despawn.

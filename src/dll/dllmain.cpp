@@ -1,15 +1,15 @@
-// mafiacoop.dll entry. DllMain only signals the launcher and spawns the init thread; all setup happens there.
+// Mod dll entry. DllMain only signals the launcher and spawns the init thread; all setup happens there. The game
+// layer (mc/game_module.h) is initialised from the init thread.
 #include "core/config.h"
 #include "core/crash.h"
 #include "core/hook.h"
 #include "core/log.h"
 #include "core/mem.h"
+#include "core/names.h"
 #include "dll/mod.h"
 #include "dll/ui_input.h"
 #include "dll/window_place.h"
-#include "game/lua.h"
-#include "game/menu.h"
-#include "game/player_sync.h"
+#include "mc/game_module.h"
 #include "render/present_hook.h"
 
 #include <windows.h>
@@ -23,11 +23,11 @@ HMODULE _module = nullptr;
 WNDPROC _gameWndProc = nullptr;
 bool _backgroundRun = true;
 
-// The game pauses its simulation (and with it the script tick) when it receives WM_ACTIVATEAPP(FALSE): its window
-// procedure (exe+0x5DF0D0) turns that message into an engine "app inactive" event. In co-op a paused game stops
-// sending its player and stops moving the puppets, and two instances on one PC could never both run. With
-// background_run = 1 (default) the deactivation is swallowed so the world keeps running while unfocused. Nothing
-// else changes: input still only goes to the focused window.
+// Games commonly pause their simulation when they receive WM_ACTIVATEAPP(FALSE) (Mafia DE: its window procedure turns
+// it into an engine "app inactive" event). In co-op a paused game stops sending its player and stops moving the
+// puppets, and two instances on one PC could never both run. With background_run = 1 (default) the deactivation is
+// swallowed so the world keeps running while unfocused. Nothing else changes: input still only goes to the focused
+// window.
 // Also the entry point for our UI's keyboard/mouse input: while a co-op panel is open, ui_input swallows the
 // keyboard and mouse messages so the game's menus underneath do not react.
 LRESULT CALLBACK ModWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -101,7 +101,7 @@ void LogEnvironment(const std::wstring& dir) {
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     const auto& main = core::mem::MainModule();
-    MC_LOG_INFO("MafiaCoop native, built " __DATE__ " " __TIME__);
+    MC_LOG_INFO("%s %s, built " __DATE__ " " __TIME__, GetGameInfo().modName, GetGameInfo().modVersion);
     MC_LOG_INFO("pid %lu, exe %s", GetCurrentProcessId(), Narrow(exe).c_str());
     MC_LOG_INFO("main module base 0x%llx size 0x%zx timestamp 0x%08x, .text 0x%llx+0x%zx",
                 static_cast<unsigned long long>(main.base), main.size, main.timeDateStamp,
@@ -110,30 +110,33 @@ void LogEnvironment(const std::wstring& dir) {
     char appId[32] = {};
     GetEnvironmentVariableA("SteamAppId", appId, sizeof(appId));
     MC_LOG_INFO("env SteamAppId=%s", appId[0] ? appId : "(unset)");
-    // How the dll got here: MafiaCoop.exe (injection) or the optional version.dll proxy in the game folder (game
-    // started from Steam; settings then come only from MafiaCoop.ini next to this dll, src/proxy/proxy_shared.h).
+    // How the dll got here: the launcher (injection) or the optional version.dll proxy in the game folder (game
+    // started from Steam; settings then come only from the ini next to this dll, src/proxy/proxy_shared.h).
+    const GameInfo& gi = GetGameInfo();
     wchar_t proxy[MAX_PATH] = {};
-    if (GetEnvironmentVariableW(L"MAFIACOOP_LAUNCHER", nullptr, 0) > 0)
-        MC_LOG_INFO("loaded by MafiaCoop.exe");
-    else if (GetEnvironmentVariableW(L"MAFIACOOP_PROXY", proxy, MAX_PATH) > 0)
-        MC_LOG_INFO("loaded by the version.dll proxy %s (game started without MafiaCoop.exe)", Narrow(proxy).c_str());
+    if (GetEnvironmentVariableW(core::EnvNameW("LAUNCHER").c_str(), nullptr, 0) > 0)
+        MC_LOG_INFO("loaded by %s", Narrow(gi.launcherName).c_str());
+    else if (GetEnvironmentVariableW(core::EnvNameW("PROXY").c_str(), proxy, MAX_PATH) > 0)
+        MC_LOG_INFO("loaded by the version.dll proxy %s (game started without %s)", Narrow(proxy).c_str(),
+                    Narrow(gi.launcherName).c_str());
     else
-        MC_LOG_INFO("loaded by an unknown injector (no MAFIACOOP_LAUNCHER / MAFIACOOP_PROXY)");
+        MC_LOG_INFO("loaded by an unknown injector (no %sLAUNCHER / %sPROXY)", gi.envPrefix, gi.envPrefix);
 }
 
-// One log per game instance: --log <tag> -> mafiacoop-<tag>.log. Without it the first instance writes
-// mafiacoop.log and any further concurrent instance mafiacoop-<pid>.log (detected with a named mutex that the
+// One log per game instance: --log <tag> -> <logPrefix>-<tag>.log. Without it the first instance writes
+// <logPrefix>.log and any further concurrent instance <logPrefix>-<pid>.log (detected with a named mutex that the
 // first instance keeps for its lifetime), so two games on one PC never rotate or interleave each other's log.
 std::wstring LogFileName() {
+    const std::wstring prefix = GetGameInfo().logPrefix;
     wchar_t tag[64] = {};
-    DWORD n = GetEnvironmentVariableW(L"MAFIACOOP_LOG", tag, 64);
-    if (n > 0 && n < 64) return std::wstring(L"mafiacoop-") + tag + L".log";
-    HANDLE m = CreateMutexW(nullptr, FALSE, L"Local\\MafiaCoopPrimaryLog");  // intentionally never closed
+    DWORD n = GetEnvironmentVariableW(core::EnvNameW("LOG").c_str(), tag, 64);
+    if (n > 0 && n < 64) return prefix + L"-" + tag + L".log";
+    HANDLE m = CreateMutexW(nullptr, FALSE, core::KernelName(L"PrimaryLog").c_str());  // intentionally never closed
     if (m && GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(m);
-        return L"mafiacoop-" + std::to_wstring(GetCurrentProcessId()) + L".log";
+        return prefix + L"-" + std::to_wstring(GetCurrentProcessId()) + L".log";
     }
-    return L"mafiacoop.log";
+    return prefix + L".log";
 }
 
 DWORD WINAPI InitThread(LPVOID) {
@@ -142,7 +145,8 @@ DWORD WINAPI InitThread(LPVOID) {
     LogEnvironment(dir);
 
     auto& cfg = core::Config::Get();
-    if (cfg.Load(dir + L"\\MafiaCoop.ini")) {
+    cfg.SetEnvPrefix(GetGameInfo().envPrefix);
+    if (cfg.Load(dir + L"\\" + GetGameInfo().iniName)) {
         MC_LOG_INFO("config: loaded %s (%zu keys)", Narrow(cfg.Path()).c_str(), cfg.Values().size());
     } else {
         MC_LOG_INFO("config: %s not found, using defaults", Narrow(cfg.Path()).c_str());
@@ -153,9 +157,9 @@ DWORD WINAPI InitThread(LPVOID) {
 
     core::crash::Install(dir + L"\\logs");
     if (!core::hook::Init()) return 1;
-    // Lua bridge: hooks the script tick (GameMainThread); independent of the window/D3D. Failure only disables it.
-    if (game::lua::Install(dir, cfg.GetString("log"))) game::PlayerSync::Install();
-    game::menu::Install(dir);
+    // The game layer's hooks (script bridge, menus, ...): independent of the window/D3D. Failures only disable
+    // features (reported to core::compat).
+    GetGameModule().Init(dir, cfg.GetString("log"));
 
     const DWORD timeoutMs = static_cast<DWORD>(cfg.GetInt("window_timeout_s", 300)) * 1000;
     MC_LOG_INFO("init: waiting for the game window");
@@ -188,10 +192,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         mc::_module = module;
         DisableThreadLibraryCalls(module);
-        // Tell the launcher the dll is in (event created by MafiaCoop.exe; absent when injected otherwise).
-        wchar_t name[64];
-        swprintf_s(name, L"Local\\MafiaCoopInjected-%lu", GetCurrentProcessId());
-        if (HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, name)) {
+        // Tell the launcher the dll is in (event created by the launcher; absent when injected otherwise).
+        const std::wstring name = mc::core::KernelName(L"Injected-" + std::to_wstring(GetCurrentProcessId()));
+        if (HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str())) {
             SetEvent(ev);
             CloseHandle(ev);
         }

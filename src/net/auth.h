@@ -1,4 +1,4 @@
-// MafiaCoop net: crypto for the optional session password (docs/protocol.md "Session password").
+// net: crypto for the optional session password (docs/protocol.md "Session password").
 // Windows BCrypt only (bcrypt.lib); no other libraries. The password itself never goes on the wire: the host sends a
 // random challenge and the guest answers with HMAC-SHA256(key = UTF-8 password, msg = kAuthContext || challenge).
 #pragma once

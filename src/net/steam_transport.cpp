@@ -1,4 +1,4 @@
-// MafiaCoop net: Steam P2P transport. Wire format in docs/protocol.md "Steam transport".
+// net: Steam P2P transport. Wire format in docs/protocol.md "Steam transport".
 #include "net/steam_transport.h"
 
 #include <windows.h>

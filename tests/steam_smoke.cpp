@@ -1,12 +1,14 @@
 // steam_smoke: verifies the flat-API bindings against a real steam_api64.dll.
 // Usage: steam_smoke.exe <path\to\steam_api64.dll>
-// Uses a COPY of the game's dll (never run against the game folder). Sets SteamAppId=1030840, initialises Steam
-// itself (the in-game dll never does), prints identity, creates a friends-only lobby, leaves, shuts down.
+// Uses a COPY of the game's dll (never run against the game folder). Sets SteamAppId to GameInfo::steamAppId (the
+// linked descriptor: core's tests use 480, Spacewar), initialises Steam itself (the in-game dll never does), prints
+// identity, creates a friends-only lobby, leaves, shuts down. Needs Steam running; not part of the automatic tests.
 #include <windows.h>
 
 #include <cstdio>
 #include <string>
 
+#include "mc/game_info.h"
 #include "net/steam_flat.h"
 #include "net/steam_lobby.h"
 #include "net/steam_transport.h"
@@ -29,8 +31,9 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     SetLogSink(PrintLog);
-    SetEnvironmentVariableW(L"SteamAppId", L"1030840");
-    SetEnvironmentVariableW(L"SteamGameId", L"1030840");
+    const std::wstring appId = std::to_wstring(mc::GetGameInfo().steamAppId);
+    SetEnvironmentVariableW(L"SteamAppId", appId.c_str());
+    SetEnvironmentVariableW(L"SteamGameId", appId.c_str());
 
     HMODULE mod = LoadLibraryW(argv[1]);
     if (!mod) {

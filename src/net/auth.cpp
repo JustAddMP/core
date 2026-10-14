@@ -12,7 +12,8 @@
 namespace mc::net::auth {
 namespace {
 
-// Domain separation: an answer for MafiaCoop's challenge is useless as an HMAC of the same bytes anywhere else.
+// Domain separation: an answer for this challenge is useless as an HMAC of the same bytes anywhere else. The string
+// is part of the wire protocol (docs/protocol.md "Session password"): changing it breaks auth with older builds.
 constexpr char kAuthContext[] = "MafiaCoop session auth v1";
 
 BCRYPT_ALG_HANDLE HmacAlg() {

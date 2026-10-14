@@ -1,16 +1,18 @@
-// Tests the version.dll proxy (src/proxy) and MafiaCoop.exe --install / --uninstall without the game.
+// Tests the version.dll proxy (src/proxy) and the launcher's --install / --uninstall without the game. All names come
+// from the linked game descriptor (mc/game_info.h): core builds it with tests/test_game_info.cpp, a game repo can build
+// it with its own descriptor (then it tests that game's launcher and proxy, still without the game).
 //
-// Usage: proxy_test.exe [work folder]     (default %TEMP%\mafiacoop-proxy-test; never the real game folder)
+// Usage: proxy_test.exe [work folder]     (default %TEMP%\<logPrefix>-proxy-test; never the real game folder)
 //
-// 1. Forwarding: LoadLibrary's a copy of out\mafiacoop_proxy.dll named version.dll from <work>\fwd and calls its
-//    exports (by name and by ordinal) against the real System32 version.dll; this exe is not the game, so the proxy
-//    must not load mafiacoop.dll even though a pointer file is there.
-// 2. Game process: copies this exe as <work>\game\mafiadefinitiveedition.exe next to the proxy (as version.dll)
-//    and a pointer file naming <work>\mod\mafiacoop.dll (a copy of a harmless system dll), then runs it. Its
-//    static import of version.dll resolves to the proxy, exactly like the game's; the child checks that the
-//    "mafiacoop.dll" is loaded before main, from the pointer's path. Then: MAFIACOOP_LAUNCHER=1 (started by the
-//    launcher) -> not loaded; no pointer file -> mafiacoop.dll next to the proxy; neither -> nothing, no crash.
-// 3. Install: MafiaCoop.exe --install/--uninstall --yes --game <work>\fakegame (a folder with a dummy game exe):
+// 1. Forwarding: LoadLibrary's a copy of the built proxy named version.dll from <work>\fwd and calls its exports (by
+//    name and by ordinal) against the real System32 version.dll; this exe is not the game, so the proxy must not load
+//    the mod dll even though a pointer file is there.
+// 2. Game process: copies this exe as <work>\game\<gameExe> next to the proxy (as version.dll) and a pointer file
+//    naming <work>\mod\<dllName> (a copy of a harmless system dll), then runs it. Its static import of version.dll
+//    resolves to the proxy, exactly like the game's; the child checks that the mod dll is loaded before main, from the
+//    pointer's path. Then: <envPrefix>LAUNCHER=1 (started by the launcher) -> not loaded; no pointer file -> the mod
+//    dll next to the proxy; neither -> nothing, no crash.
+// 3. Install: <launcher> --install/--uninstall --yes --game <work>\fakegame (a folder with a dummy game exe):
 //    install, reinstall (update), uninstall, uninstall again, foreign version.dll / pointer file refused and left
 //    untouched, other files never touched.
 #include "proxy/proxy_shared.h"
@@ -29,6 +31,8 @@
 namespace {
 
 int _failures = 0;
+
+std::wstring DllName() { return mc::GetGameInfo().dllName; }
 
 void Check(bool ok, const char* what) {
     std::printf("[%s] %s\n", ok ? " ok " : "FAIL", what);
@@ -98,15 +102,15 @@ int Run(const std::wstring& exe, const std::wstring& args, const wchar_t* extraE
     return static_cast<int>(code);
 }
 
-// ---- child: runs as <work>\game\mafiadefinitiveedition.exe --------------------------------------------------------
+// ---- child: runs as <work>\game\<gameExe> -------------------------------------------------------------------------
 
 int Child(const std::wstring& expect) {
     // Nothing alertable has run in this thread before main, so a module loaded now was loaded by the proxy's APC
     // at the end of process initialization (the moment the game's entry point would start).
-    HMODULE mod = GetModuleHandleW(L"mafiacoop.dll");
+    HMODULE mod = GetModuleHandleW(DllName().c_str());
     const std::wstring self = ModulePath(nullptr);
     const std::wstring ver = ModulePath(GetModuleHandleW(L"version.dll"));
-    std::printf("       child: version.dll = %ls, mafiacoop.dll = %ls\n", ver.c_str(),
+    std::printf("       child: version.dll = %ls, %ls = %ls\n", ver.c_str(), DllName().c_str(),
                 mod ? ModulePath(mod).c_str() : L"(not loaded)");
     bool ok = _wcsicmp(DirOf(ver).c_str(), DirOf(self).c_str()) == 0;  // the import resolved to the proxy
     DWORD h = 0;
@@ -116,7 +120,7 @@ int Child(const std::wstring& expect) {
     } else {
         wchar_t env[MAX_PATH] = {};
         ok = ok && mod && _wcsicmp(ModulePath(mod).c_str(), expect.c_str()) == 0 &&
-             GetEnvironmentVariableW(mc::proxy::kEnvProxy, env, MAX_PATH) > 0 && _wcsicmp(env, ver.c_str()) == 0;
+             GetEnvironmentVariableW(mc::proxy::EnvProxy().c_str(), env, MAX_PATH) > 0 && _wcsicmp(env, ver.c_str()) == 0;
     }
     return ok ? 0 : 1;
 }
@@ -148,7 +152,7 @@ void TestForwarding(const std::wstring& work, const std::wstring& proxy, const s
     CreateDirectoryW(dir.c_str(), nullptr);
     const std::wstring copy = dir + L"\\version.dll";
     Check(CopyFileW(proxy.c_str(), copy.c_str(), FALSE) != 0, "copy the proxy as fwd\\version.dll");
-    WriteAll(dir + L"\\" + mc::proxy::kPointerName, std::string(mc::proxy::kPointerHeader) + "\r\n" + Utf8(dummyMod));
+    WriteAll(dir + L"\\" + mc::proxy::PointerName(), mc::proxy::PointerHeader() + "\r\n" + Utf8(dummyMod));
 
     HMODULE p = LoadLibraryW(copy.c_str());
     Check(p != nullptr, "LoadLibrary(fwd\\version.dll)");
@@ -186,39 +190,39 @@ void TestForwarding(const std::wstring& work, const std::wstring& proxy, const s
     Check(sizeW(L"Z:\\no\\such\\file.dll", &h) == 0 && GetLastError() != 0, "errors pass through (missing file)");
 
     SleepEx(0, TRUE);  // deliver any APC the proxy might have queued
-    Check(GetModuleHandleW(L"mafiacoop.dll") == nullptr, "no mafiacoop.dll loaded: this process is not the game");
+    Check(GetModuleHandleW(DllName().c_str()) == nullptr, "no mod dll loaded: this process is not the game");
 }
 
 void TestGameProcess(const std::wstring& work, const std::wstring& proxy, const std::wstring& dummyMod) {
-    std::printf("-- game process (a copy of this exe named mafiadefinitiveedition.exe)\n");
+    std::printf("-- game process (a copy of this exe named %ls)\n", mc::proxy::GameExe());
     const std::wstring dir = work + L"\\game";
     CreateDirectoryW(dir.c_str(), nullptr);
-    const std::wstring exe = dir + L"\\" + mc::proxy::kGameExe;
-    const std::wstring pointer = dir + L"\\" + mc::proxy::kPointerName;
-    const std::wstring local = dir + L"\\mafiacoop.dll";
+    const std::wstring exe = dir + L"\\" + mc::proxy::GameExe();
+    const std::wstring pointer = dir + L"\\" + mc::proxy::PointerName();
+    const std::wstring local = dir + L"\\" + DllName();
     Check(CopyFileW(ModulePath(nullptr).c_str(), exe.c_str(), FALSE) && CopyFileW(proxy.c_str(), (dir + L"\\version.dll").c_str(), FALSE),
-          "copy this exe as mafiadefinitiveedition.exe and the proxy as version.dll");
-    WriteAll(pointer, std::string(mc::proxy::kPointerHeader) + ": test\r\n\r\n" + Utf8(dummyMod) + "\r\n");
+          "copy this exe as the game exe and the proxy as version.dll");
+    WriteAll(pointer, mc::proxy::PointerHeader() + ": test\r\n\r\n" + Utf8(dummyMod) + "\r\n");
     DeleteFileW(local.c_str());
 
-    Check(Run(exe, L"--child \"" + dummyMod + L"\"") == 0, "proxy loads mafiacoop.dll from the pointer file before main");
-    Check(Run(exe, L"--child none", mc::proxy::kEnvLauncher) == 0,
-          "MAFIACOOP_LAUNCHER=1 (started by MafiaCoop.exe): the proxy leaves the loading to the launcher");
+    Check(Run(exe, L"--child \"" + dummyMod + L"\"") == 0, "proxy loads the mod dll from the pointer file before main");
+    Check(Run(exe, L"--child none", mc::proxy::EnvLauncher().c_str()) == 0,
+          "<envPrefix>LAUNCHER=1 (started by the launcher): the proxy leaves the loading to the launcher");
     DeleteFileW(pointer.c_str());
-    Check(Run(exe, L"--child none") == 0, "no pointer file and no mafiacoop.dll next to it: nothing loaded, no crash");
+    Check(Run(exe, L"--child none") == 0, "no pointer file and no mod dll next to it: nothing loaded, no crash");
     CopyFileW(dummyMod.c_str(), local.c_str(), FALSE);
-    Check(Run(exe, L"--child \"" + local + L"\"") == 0, "no pointer file: mafiacoop.dll next to the proxy is used");
+    Check(Run(exe, L"--child \"" + local + L"\"") == 0, "no pointer file: the mod dll next to the proxy is used");
     DeleteFileW(local.c_str());
 }
 
 void TestInstall(const std::wstring& work, const std::wstring& outDir, const std::wstring& proxy) {
-    std::printf("-- MafiaCoop.exe --install / --uninstall against a fake game folder\n");
-    const std::wstring launcher = outDir + L"\\MafiaCoop.exe";
+    std::printf("-- %ls --install / --uninstall against a fake game folder\n", mc::GetGameInfo().launcherName);
+    const std::wstring launcher = outDir + L"\\" + mc::GetGameInfo().launcherName;
     const std::wstring fake = work + L"\\fakegame";
     CreateDirectoryW(fake.c_str(), nullptr);
-    const std::wstring gameExe = fake + L"\\" + mc::proxy::kGameExe;
+    const std::wstring gameExe = fake + L"\\" + mc::proxy::GameExe();
     const std::wstring target = fake + L"\\version.dll";
-    const std::wstring pointer = fake + L"\\" + mc::proxy::kPointerName;
+    const std::wstring pointer = fake + L"\\" + mc::proxy::PointerName();
     const std::wstring other = fake + L"\\other_mod_file.txt";
     WriteAll(gameExe, "MZ dummy game exe for proxy_test");
     WriteAll(other, "not ours");
@@ -228,10 +232,10 @@ void TestInstall(const std::wstring& work, const std::wstring& outDir, const std
     const std::string proxyBytes = ReadAll(proxy);
 
     Check(Run(launcher, L"--install --yes " + game) == 0, "--install exits 0");
-    Check(ReadAll(target) == proxyBytes, "version.dll in the game folder is mafiacoop_proxy.dll");
+    Check(ReadAll(target) == proxyBytes, "version.dll in the game folder is the built proxy");
     const std::string ptr = ReadAll(pointer);
-    Check(ptr.rfind(mc::proxy::kPointerHeader, 0) == 0 && ptr.find(Utf8(outDir + L"\\mafiacoop.dll")) != std::string::npos,
-          "mafiacoop_path.txt names out\\mafiacoop.dll");
+    Check(ptr.rfind(mc::proxy::PointerHeader(), 0) == 0 && ptr.find(Utf8(outDir + L"\\" + DllName())) != std::string::npos,
+          "the pointer file names the mod dll in out\\");
     Check(Run(launcher, L"--install --yes --game \"" + fake + L"\"") == 0, "--install again (update, --game as folder) exits 0");
     Check(Run(launcher, L"--uninstall --yes " + game) == 0, "--uninstall exits 0");
     Check(!IsFile(target) && !IsFile(pointer), "both files removed");
@@ -247,8 +251,8 @@ void TestInstall(const std::wstring& work, const std::wstring& outDir, const std
     DeleteFileW(target.c_str());
 
     WriteAll(pointer, "someone else's file");
-    Check(Run(launcher, L"--install --yes " + game) == 3 && !IsFile(target), "--install with a foreign mafiacoop_path.txt is refused");
-    Check(ReadAll(pointer) == "someone else's file", "foreign mafiacoop_path.txt unchanged");
+    Check(Run(launcher, L"--install --yes " + game) == 3 && !IsFile(target), "--install with a foreign pointer file is refused");
+    Check(ReadAll(pointer) == "someone else's file", "foreign pointer file unchanged");
     DeleteFileW(pointer.c_str());
 
     Check(Run(launcher, L"--install --yes --game \"" + work + L"\"") == 1 && !IsFile(work + L"\\version.dll"),
@@ -269,23 +273,25 @@ int wmain(int argc, wchar_t** argv) {
     } else {
         wchar_t tmp[MAX_PATH];
         GetTempPathW(MAX_PATH, tmp);
-        work = std::wstring(tmp) + L"mafiacoop-proxy-test";
+        work = std::wstring(tmp) + mc::GetGameInfo().logPrefix + L"-proxy-test";
     }
     while (!work.empty() && work.back() == L'\\') work.pop_back();
     CreateDirectoryW(work.c_str(), nullptr);
     std::printf("proxy_test: work folder %ls\n", work.c_str());
 
-    const std::wstring proxy = outDir + L"\\" + mc::proxy::kBuiltName;
+    const std::wstring proxy = outDir + L"\\" + mc::proxy::BuiltName();
     if (!IsFile(proxy)) {
         std::printf("FAIL: %ls not built\n", proxy.c_str());
         return 1;
     }
-    Check(ReadAll(proxy).find(mc::proxy::kMarker) != std::string::npos, "mafiacoop_proxy.dll carries the marker");
-    // Stand-in for mafiacoop.dll: a harmless system dll under that name (DllMain does nothing visible).
+    std::printf("proxy_test: %s %s, game exe %ls, proxy %ls\n", mc::GetGameInfo().modName,
+                mc::GetGameInfo().modVersion, mc::proxy::GameExe(), proxy.c_str());
+    Check(ReadAll(proxy).find(mc::proxy::Marker()) != std::string::npos, "the proxy dll carries the marker");
+    // Stand-in for the mod dll: a harmless system dll under that name (DllMain does nothing visible).
     const std::wstring modDir = work + L"\\mod";
     CreateDirectoryW(modDir.c_str(), nullptr);
-    const std::wstring dummyMod = modDir + L"\\mafiacoop.dll";
-    Check(CopyFileW(SystemDll(L"msimg32.dll").c_str(), dummyMod.c_str(), FALSE) != 0, "dummy mafiacoop.dll (msimg32 copy)");
+    const std::wstring dummyMod = modDir + L"\\" + DllName();
+    Check(CopyFileW(SystemDll(L"msimg32.dll").c_str(), dummyMod.c_str(), FALSE) != 0, "dummy mod dll (msimg32 copy)");
 
     TestForwarding(work, proxy, dummyMod);
     TestGameProcess(work, proxy, dummyMod);

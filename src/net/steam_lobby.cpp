@@ -24,11 +24,12 @@ SteamLobby::~SteamLobby() {
     for (int h : subs_) steam::Unsubscribe(h);
 }
 
-bool SteamLobby::Init(std::string modVersion, uint32_t protocolVersion) {
+bool SteamLobby::Init(std::string modVersion, uint32_t protocolVersion, std::string status) {
     if (inited_) return true;
     if (!steam::Load() || !steam::AcquireInterfaces()) return false;
     modVersion_ = std::move(modVersion);
     protocol_ = protocolVersion;
+    status_ = std::move(status);
     subs_.push_back(steam::Subscribe(steam::kCb_GameLobbyJoinRequested, sizeof(steam::GameLobbyJoinRequested_t),
                                      [this](const void* d) {
                                          auto* e = static_cast<const steam::GameLobbyJoinRequested_t*>(d);
@@ -170,7 +171,7 @@ void SteamLobby::SetPresence(bool on) {
     if (on) {
         std::string connect = "+connect_lobby " + std::to_string(lobby_);
         api().Friends_SetRichPresence(api().friends, "connect", connect.c_str());
-        api().Friends_SetRichPresence(api().friends, "status", "Mafia co-op");
+        api().Friends_SetRichPresence(api().friends, "status", status_.c_str());
     } else {
         api().Friends_SetRichPresence(api().friends, "connect", "");
         api().Friends_SetRichPresence(api().friends, "status", "");

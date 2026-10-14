@@ -1,4 +1,4 @@
-// MafiaCoop net: Steam lobby (ISteamMatchmaking009) + invites (ISteamFriends017).
+// net: Steam lobby (ISteamMatchmaking009) + invites (ISteamFriends017).
 // Friends-only lobby, max 4. Lobby data: mc_version, mc_proto, mc_host. Rich presence "connect" =
 // "+connect_lobby <id>" so "Join Game" works from the friends list. Single-threaded: call Poll() each frame.
 #pragma once
@@ -19,7 +19,8 @@ public:
     SteamLobby& operator=(const SteamLobby&) = delete;
 
     // Resolves the flat API (steam_api64.dll must be loaded and Steam initialised) and registers callbacks.
-    bool Init(std::string modVersion, uint32_t protocolVersion);
+    // status: Steam rich presence "status" shown to friends while in a lobby (GameInfo::steamStatus).
+    bool Init(std::string modVersion, uint32_t protocolVersion, std::string status = "co-op");
     void Poll();
 
     bool Create(int maxMembers = 4);  // friends-only
@@ -67,6 +68,7 @@ private:
     double enteredAt_ = 0;
     std::string modVersion_;
     uint32_t protocol_ = 0;
+    std::string status_;
     bool inited_ = false;
     std::vector<int> subs_;
 };

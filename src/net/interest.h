@@ -1,4 +1,4 @@
-// MafiaCoop net: interest management. Decides, per receiving peer, which replicated entities are relevant (in range
+// net: interest management. Decides, per receiving peer, which replicated entities are relevant (in range
 // of one of the peer's viewpoints, with enter/leave hysteresis), emits Enter/Leave events so the sync layer can
 // spawn/despawn them on that peer, and builds a per-peer send list ordered by priority and staleness, with the update
 // rate scaled by distance and capped by a per-peer byte budget. See docs/interest.md.

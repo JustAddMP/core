@@ -1,4 +1,4 @@
-// MafiaCoop net: UDP transport. See docs/protocol.md "UDP transport" for the wire format.
+// net: UDP transport. See docs/protocol.md "UDP transport" for the wire format.
 #include "net/udp_transport.h"
 
 #include <winsock2.h>
@@ -782,7 +782,7 @@ bool UdpTransport::Host(uint16_t port) {
 PeerId UdpTransport::Connect(std::string_view address) {
     Impl& m = *impl_;
     std::string s(address);
-    uint16_t port = kDefaultPort;
+    uint16_t port = m.opt.defaultPort;
     size_t colon = s.rfind(':');
     if (colon != std::string::npos) {
         int pv = atoi(s.c_str() + colon + 1);

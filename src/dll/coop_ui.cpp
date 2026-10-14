@@ -2,10 +2,9 @@
 
 #include "core/compat.h"
 #include "core/log.h"
-#include "core/version.h"
 #include "dll/coop.h"
 #include "dll/ui_input.h"
-#include "game/menu.h"
+#include "mc/game_module.h"
 
 #include <windows.h>
 #include <xinput.h>
@@ -88,23 +87,23 @@ void AddToast(std::string title, std::string text, bool error, float seconds = k
 // Once, on the first frame: tell the player when this game build is not (fully) supported (core/compat.h) instead
 // of letting features fail silently. Stays up longer than other banners so it is seen past the intro videos.
 void ShowCompatBanner() {
+    const std::string mod = GetGameInfo().modName, ver = GetGameInfo().modVersion;
     const std::string crc = core::compat::UnsupportedBuildCrc();
     const std::string missing = core::compat::FailedList();
     const std::string found = crc.empty() ? std::string() : " (exe CRC " + crc + ")";
     if (core::compat::CoopDisabled()) {
         AddToast("Co-op disabled: unsupported game version",
-                 "This game version" + found + " is not supported by MafiaCoop " + kModVersion + " (missing: " +
-                     missing + "). Check for a newer MafiaCoop.",
+                 "This game version" + found + " is not supported by " + mod + " " + ver + " (missing: " + missing +
+                     "). Check for a newer " + mod + ".",
                  true, kCompatToastSeconds);
     } else if (!missing.empty()) {
         AddToast("Unsupported game version",
-                 "Co-op " + missing + " are not available on this game version" + found +
-                     ". Check for a newer MafiaCoop.",
+                 "Co-op " + missing + " are not available on this game version" + found + ". Check for a newer " +
+                     mod + ".",
                  true, kCompatToastSeconds);
     } else if (!crc.empty()) {
         AddToast("Unsupported game version",
-                 "MafiaCoop " + std::string(kModVersion) + " was not made for this game version" + found +
-                     ". Co-op may not work correctly.",
+                 mod + " " + ver + " was not made for this game version" + found + ". Co-op may not work correctly.",
                  true, kCompatToastSeconds);
     }
 }
@@ -462,7 +461,7 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
         status = "HOSTING";
         if (info.lobbyOpen) status += "  -  STEAM";
         if (info.port) status += "  -  " + (info.localAddress.empty() ? std::string("UDP") : info.localAddress) +
-                                 (info.port == 27960 ? std::string() : ":" + std::to_string(info.port));
+                                 (info.port == GetGameInfo().defaultPort ? std::string() : ":" + std::to_string(info.port));
         break;
     case Coop::Phase::Joining: status = "JOINING " + Upper(info.target) + "..."; break;
     case Coop::Phase::Connected: status = "CONNECTED TO " + Upper(info.target); break;
@@ -549,29 +548,30 @@ void CoopUi::Tick(float dt) {
     }
     u.info = Coop::GetInfo();
 
-    // native menu entries: publish state, run their commands
-    game::menu::State ms;
+    // native menu entries (the game module patches them into the game's menus): publish state, run their commands
+    GameModule& game = GetGameModule();
+    MenuState ms;
     switch (u.info.phase) {
-    case Coop::Phase::Idle: ms.mode = game::menu::Mode::Idle; break;
+    case Coop::Phase::Idle: ms.mode = MenuMode::Idle; break;
     case Coop::Phase::Starting:
-    case Coop::Phase::Hosting: ms.mode = game::menu::Mode::Hosting; break;
-    case Coop::Phase::Joining: ms.mode = game::menu::Mode::Joining; break;
-    case Coop::Phase::Connected: ms.mode = game::menu::Mode::Connected; break;
+    case Coop::Phase::Hosting: ms.mode = MenuMode::Hosting; break;
+    case Coop::Phase::Joining: ms.mode = MenuMode::Joining; break;
+    case Coop::Phase::Connected: ms.mode = MenuMode::Connected; break;
     }
     ms.players = static_cast<int>(u.info.players.size());
     ms.password = u.info.passwordSet;
-    game::menu::SetState(ms);
-    game::menu::Command cmd;
-    while (game::menu::PopCommand(&cmd)) {
+    game.SetMenuState(ms);
+    MenuCommand cmd;
+    while (game.PopMenuCommand(&cmd)) {
         switch (cmd) {
-        case game::menu::Command::Host: Coop::Host(); break;
-        case game::menu::Command::Leave: Coop::Leave(); break;
-        case game::menu::Command::JoinFriend: Coop::OpenSteamFriends(); break;
-        case game::menu::Command::JoinByIp: Open(Panel::JoinIp); break;
-        case game::menu::Command::Invite: Coop::InviteFriends(); break;
-        case game::menu::Command::PausePanel: Open(Panel::PauseCoop); break;
-        case game::menu::Command::SetPassword: Open(Panel::Password, true); break;
-        case game::menu::Command::ClearPassword: Coop::SetPassword(""); break;
+        case MenuCommand::Host: Coop::Host(); break;
+        case MenuCommand::Leave: Coop::Leave(); break;
+        case MenuCommand::JoinFriend: Coop::OpenSteamFriends(); break;
+        case MenuCommand::JoinByIp: Open(Panel::JoinIp); break;
+        case MenuCommand::Invite: Coop::InviteFriends(); break;
+        case MenuCommand::PausePanel: Open(Panel::PauseCoop); break;
+        case MenuCommand::SetPassword: Open(Panel::Password, true); break;
+        case MenuCommand::ClearPassword: Coop::SetPassword(""); break;
         }
     }
     if (Coop::PopPasswordPrompt()) Open(Panel::Password, false);  // a join was refused for its password

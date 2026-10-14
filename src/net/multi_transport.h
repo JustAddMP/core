@@ -1,4 +1,4 @@
-// MafiaCoop net: one Transport made of several (e.g. UDP + Steam), so a single host Session accepts guests from
+// net: one Transport made of several (e.g. UDP + Steam), so a single host Session accepts guests from
 // both. Peer ids of the parts must not collide: UDP uses small synthetic ids (1, 2, 3, ...), Steam uses SteamID64s
 // (always >= 2^52 for individual accounts), so they never overlap in practice; a collision is detected and logged.
 // Connect() goes through the first part only (guests use a single transport).

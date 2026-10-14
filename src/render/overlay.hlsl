@@ -1,4 +1,4 @@
-// MafiaCoop status overlay: textured, vertex-coloured quads in pixel coordinates.
+// Overlay shader: textured, vertex-coloured quads in pixel coordinates.
 // Compiled at build time by build.cmd with fxc (vs_4_0 / ps_4_0) into out\obj\gen\overlay_{vs,ps}.h.
 
 cbuffer Screen : register(b0) {

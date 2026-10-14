@@ -304,7 +304,7 @@ void Session::HostOnHello(PeerId peer, ByteReader& r) {
         Reject(peer, kRejectVersion,
                "version mismatch: host has protocol " + std::to_string(cfg_.protocolVersion) + " build " +
                    std::to_string(cfg_.modBuild) + ", you have protocol " + std::to_string(proto) + " build " +
-                   std::to_string(build) + ". Both players need the same MafiaCoop version.");
+                   std::to_string(build) + ". Both players need the same " + cfg_.modName + " version.");
         return;
     }
     if (static_cast<int>(players_.size()) >= cfg_.maxPlayers) {

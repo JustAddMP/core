@@ -2,16 +2,18 @@
 // Co-op connection management, driven from Mod::Tick on the render thread.
 //
 // Sessions can be started from the game's menus at runtime (Host / JoinAddress / JoinLobby / Leave, see
-// dll/coop_ui.h and game/menu.h) or, as before, from launcher args / MafiaCoop.ini at startup:
-//   --host                 host: UDP on --port (27960) plus a Steam lobby (P2P) when Steam is available
+// dll/coop_ui.h and the game module's menu commands) or from launcher args / the ini at startup:
+//   --host                 host: UDP on --port (GameInfo::defaultPort) plus a Steam lobby (P2P) when Steam is
+//                          available
 //   --join <ip[:port]>     guest over UDP
 //   --join-lobby <id>      guest over Steam (also "+connect_lobby <id>" on the game's command line)
 //   --transport udp|steam  restrict the host to one transport; with steam, --join <id> is a lobby id
 //   --name <name>          player name (default: Steam persona name, else the Windows user name)
 //   --password <p>         host: guests must answer with this password; guest: the password to join with
 //   require_password_for_invites = 1   (ini) Steam lobby members (invited friends) need the password too
-// Steam: the game memory-loads its own (old) steam_api, so we LoadLibrary the on-disk steam_api64.dll, call its
-// SteamAPI_Init a few seconds after the first frame and pump its SteamAPI_RunCallbacks ourselves every frame.
+// Steam: we do not rely on the game's own steam_api (Mafia DE memory-loads an old one): we LoadLibrary the on-disk
+// steam_api64.dll, call its SteamAPI_Init a few seconds after the first frame and pump its SteamAPI_RunCallbacks
+// ourselves every frame.
 // Accepting a Steam invite (or "Join Game" in the friends list) while the game runs leaves the current session and
 // joins the inviting host.
 #include "render/overlay.h"

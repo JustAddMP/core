@@ -1,4 +1,4 @@
-// MafiaCoop net: direct UDP transport (Winsock), own reliability layer. Wire format in docs/protocol.md.
+// net: direct UDP transport (Winsock), own reliability layer. Wire format in docs/protocol.md.
 // IPv4 only. Single-threaded: call everything from the thread that calls Poll().
 #pragma once
 #include <functional>
@@ -16,6 +16,7 @@ struct UdpOptions {
     double pingIntervalS = 0.5;     // keepalive / RTT probe
     int maxPeers = 8;               // incoming connection limit when hosting
     int maxPeersPerAddress = 4;     // incoming connections from one IPv4 address (any port)
+    uint16_t defaultPort = kDefaultPort;  // Connect("ip") without a port
     // Test-only network simulation, applied to datagrams this transport SENDS.
     float simLoss = 0.0f;           // 0..1 drop probability
     float simLatencyMs = 0.0f;      // base one-way delay

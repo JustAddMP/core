@@ -1,4 +1,4 @@
-// MafiaCoop net: Steam P2P transport over ISteamNetworking006 (flat API from the game's steam_api64.dll).
+// net: Steam P2P transport over ISteamNetworking006 (flat API from the game's steam_api64.dll).
 // Peer ids are SteamID64s. NAT traversal and relay are Steam's. Our own tiny control layer on top gives
 // Connected/Disconnected events, keepalive/timeout and RTT (see docs/protocol.md "Steam transport").
 #pragma once

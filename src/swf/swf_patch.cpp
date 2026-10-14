@@ -1,10 +1,10 @@
-#include "game/swf_patch.h"
+#include "swf/swf_patch.h"
 
 #include "core/log.h"
 
 #include <cstring>
 
-namespace mc::game::swf {
+namespace mc::swf {
 namespace {
 
 struct Reader {
@@ -567,4 +567,4 @@ bool PatchMovie(std::vector<uint8_t>& movie, const std::function<bool(Abc&, std:
     return true;
 }
 
-}  // namespace mc::game::swf
+}  // namespace mc::swf

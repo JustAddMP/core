@@ -1,59 +1,58 @@
 #include "core/compat.h"
 
 #include "core/log.h"
+#include "core/names.h"
 
 #include <windows.h>
 #include <mutex>
+#include <vector>
 
 namespace mc::core::compat {
 namespace {
 
-std::mutex _mutex;
-bool _failed[2] = {};
+struct Entry {
+    std::string name;
+    bool required;
+};
 
-const char* Name(Feature f) {
-    switch (f) {
-    case Feature::LuaBridge: return "Lua bridge";
-    case Feature::NativeMenu: return "menu entries";
-    }
-    return "?";
-}
+std::mutex _mutex;
+std::vector<Entry> _failed;
 
 }  // namespace
 
-void Failed(Feature feature) {
+void Failed(const char* feature, bool required) {
     std::lock_guard lock(_mutex);
-    bool& flag = _failed[static_cast<int>(feature)];
-    if (flag) return;
-    flag = true;
-    MC_LOG_ERROR("compat: %s unavailable on this game build%s", Name(feature),
-                 feature == Feature::LuaBridge ? "; co-op disabled" : "");
+    for (const Entry& e : _failed)
+        if (e.name == feature) return;
+    _failed.push_back({feature, required});
+    MC_LOG_ERROR("compat: %s unavailable on this game build%s", feature, required ? "; co-op disabled" : "");
 }
 
 bool CoopDisabled() {
     std::lock_guard lock(_mutex);
-    return _failed[static_cast<int>(Feature::LuaBridge)];
+    for (const Entry& e : _failed)
+        if (e.required) return true;
+    return false;
 }
 
 bool AnyFailed() {
     std::lock_guard lock(_mutex);
-    return _failed[0] || _failed[1];
+    return !_failed.empty();
 }
 
 std::string FailedList() {
     std::lock_guard lock(_mutex);
     std::string s;
-    for (Feature f : {Feature::LuaBridge, Feature::NativeMenu}) {
-        if (!_failed[static_cast<int>(f)]) continue;
+    for (const Entry& e : _failed) {
         if (!s.empty()) s += ", ";
-        s += Name(f);
+        s += e.name;
     }
     return s;
 }
 
 std::string UnsupportedBuildCrc() {
     char buf[32] = {};
-    const DWORD n = GetEnvironmentVariableA("MAFIACOOP_UNSUPPORTED_BUILD", buf, sizeof(buf));
+    const DWORD n = GetEnvironmentVariableA(EnvName("UNSUPPORTED_BUILD").c_str(), buf, sizeof(buf));
     return (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : std::string();
 }
 

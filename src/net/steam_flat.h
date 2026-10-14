@@ -1,4 +1,4 @@
-// MafiaCoop net: minimal Steamworks flat-API bindings, resolved at runtime with GetProcAddress from the
+// net: minimal Steamworks flat-API bindings, resolved at runtime with GetProcAddress from the
 // steam_api64.dll the game already loaded. No Steamworks SDK headers: the few signatures/structs we use are
 // declared here from the public Steamworks documentation.
 //

@@ -1,4 +1,4 @@
-// MafiaCoop net: byte writer/reader for message encoding.
+// net: byte writer/reader for message encoding.
 // Little-endian fixed-size ints, IEEE floats, LEB128 varints, length-prefixed strings.
 // Reads are bounds-checked: on overrun the reader sets Failed() and returns zero values; it never throws.
 #pragma once

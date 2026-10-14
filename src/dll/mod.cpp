@@ -6,7 +6,7 @@
 #include "dll/coop.h"
 #include "dll/coop_ui.h"
 #include "dll/window_place.h"
-#include "game/lua.h"
+#include "mc/game_module.h"
 #include "render/overlay.h"
 #include "render/present_hook.h"
 
@@ -98,7 +98,7 @@ void Mod::Tick(float dt) {
         for (const auto& l : lines) MC_LOG_INFO("status: %s", l.text.c_str());
     }
 
-    game::lua::PollRender(dt);
+    GetGameModule().RenderTick(dt);
     Coop::Tick(dt);
     render::Overlay::Track(render::GameSwapChain());
     CoopUi::Tick(dt);

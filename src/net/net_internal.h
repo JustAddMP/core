@@ -1,4 +1,4 @@
-// MafiaCoop net: internal helpers shared by the net sources (not part of the public API).
+// net: internal helpers shared by the net sources (not part of the public API).
 #pragma once
 #include <cstdint>
 

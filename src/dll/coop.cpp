@@ -3,9 +3,7 @@
 #include "core/compat.h"
 #include "core/config.h"
 #include "core/log.h"
-#include "core/version.h"
-#include "dll/ui_input.h"
-#include "game/player_sync.h"
+#include "mc/game_module.h"
 #include "net/multi_transport.h"
 #include "net/session.h"
 #include "net/steam_flat.h"
@@ -49,12 +47,12 @@ const char* ModeName(Mode m) {
     return "?";
 }
 
-// Hello carries this; both sides must match exactly. Derived from kModVersion ("1.2.3" -> 10203), so players
-// can connect whenever they run the same release. Bump kModVersion when the wire format or sync changes.
+// Hello carries this; both sides must match exactly. Derived from GameInfo::modVersion ("1.2.3" -> 10203), so
+// players can connect whenever they run the same release. Bump modVersion when the wire format or sync changes.
 uint32_t BuildNumber() {
     uint32_t parts[3] = {0, 0, 0};
     int i = 0;
-    for (const char* s = kModVersion; *s && i < 3; ++s) {
+    for (const char* s = GetGameInfo().modVersion; *s && i < 3; ++s) {
         if (*s == '.') ++i;
         else if (*s >= '0' && *s <= '9') parts[i] = parts[i] * 10 + static_cast<uint32_t>(*s - '0');
     }
@@ -71,7 +69,7 @@ struct State {
     uint64_t lobbyId = 0;   // JoinLobby
     std::string transport;  // "", "udp", "steam"
     std::string name;       // from config; empty = Steam persona / Windows user
-    uint16_t port = net::kDefaultPort;
+    uint16_t port = GetGameInfo().defaultPort;
 
     // Steam (our own steam_api64.dll instance, see coop.h)
     SteamState steam = SteamState::Pending;
@@ -152,6 +150,12 @@ std::string PlayerName() {
     return "Player";
 }
 
+net::UdpOptions UdpOpts() {
+    net::UdpOptions o;
+    o.defaultPort = GetGameInfo().defaultPort;  // "join <ip>" without a port
+    return o;
+}
+
 void SetError(const std::string& why) {
     State& s = S();
     s.lastError = why;
@@ -202,7 +206,7 @@ std::string LocalAddress() {
 void Teardown() {
     State& s = S();
     s.teardown = false;
-    game::PlayerSync::Detach();
+    GetGameModule().OnSessionEnd();
     if (s.session) s.session->Leave();
     s.session.reset();
     s.net.reset();
@@ -235,12 +239,13 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     cfg.modBuild = BuildNumber();
     cfg.playerName = PlayerName();
     cfg.playerModel = core::Config::Get().GetString("model");  // character we appear as (alias or spawn profile)
+    cfg.modName = GetGameInfo().modName;
     cfg.password = s.mode == Mode::Host ? s.password : s.joinPassword;
     cfg.invitesSkipPassword = !s.requireInvitePassword;
     s.net = std::move(transport);
     s.session = std::make_unique<net::Session>(*s.net, cfg);
     net::Session& session = *s.session;
-    game::PlayerSync::Attach(session);
+    GetGameModule().OnSessionStart(session);
     MC_LOG_INFO("coop: session as '%s' over %s (protocol %u, build %08x)", session.Config().playerName.c_str(),
                 s.net->Name(), cfg.protocolVersion, cfg.modBuild);
 
@@ -259,7 +264,7 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     session.onPlayerLeft = [](const net::PlayerInfo& p, const std::string& reason) {
         MC_LOG_INFO("coop: player %u '%s' left: %s", p.id, p.name.c_str(), reason.c_str());
         Notify("CO-OP", p.name + " left the game");
-        game::PlayerSync::OnPlayerLeft(p.id);
+        GetGameModule().OnPlayerLeft(p.id);
     };
     session.onChat = [](net::PlayerId from, const std::string& text) {
         MC_LOG_INFO("coop: chat from %u: %s", from, text.c_str());
@@ -326,7 +331,7 @@ void OnJoinRequested(uint64_t lobbyId) {
     }
     if (s.session) {
         MC_LOG_INFO("coop: leaving the current session to follow the invite");
-        game::PlayerSync::Detach();
+        GetGameModule().OnSessionEnd();
         s.session->Leave();
         s.session.reset();
         s.net.reset();
@@ -334,9 +339,9 @@ void OnJoinRequested(uint64_t lobbyId) {
     StartLobbyJoin(lobbyId);  // SteamLobby::Join leaves a lobby we host
 }
 
-// The game memory-loads its own old steam_api (docs/re-notes.md 3.1), so there is no steam_api64.dll module and
-// no flat API in the process. We load the newer on-disk dll ourselves; its SteamAPI_Init opens our own pipe to
-// the same steamclient64.dll, and we pump its callbacks (PollSteam).
+// Some games (Mafia DE) memory-load their own old steam_api, so there is no steam_api64.dll module and no flat API
+// in the process. We load the on-disk dll (game folder, else next to our dll) ourselves; its SteamAPI_Init opens our
+// own pipe to the same steamclient64.dll, and we pump its callbacks (PollSteam).
 void InitSteam() {
     State& s = S();
     std::wstring path = DirOf(nullptr) + L"\\steam_api64.dll";
@@ -370,8 +375,8 @@ void InitSteam() {
     MC_LOG_INFO("coop: Steam ready: SteamID %llu, persona '%s', app %u", static_cast<unsigned long long>(s.steamId),
                 s.persona.c_str(), api.Utils_GetAppID(api.utils));
 
-    std::string version = kModVersion;
-    if (!s.lobby.Init(version, net::kProtocolVersion)) {
+    const GameInfo& gi = GetGameInfo();
+    if (!s.lobby.Init(gi.modVersion, net::kProtocolVersion, gi.steamStatus)) {
         s.steam = SteamState::Failed;
         return;
     }
@@ -421,7 +426,7 @@ void TryStart() {
         auto multi = std::make_unique<net::MultiTransport>();
         net::MultiTransport* multiRaw = multi.get();
         net::Transport* steamRaw = nullptr;
-        if (s.transport != "steam") multi->Add(std::make_unique<net::UdpTransport>());
+        if (s.transport != "steam") multi->Add(std::make_unique<net::UdpTransport>(UdpOpts()));
         const bool steamPart = wantSteam && s.steam == SteamState::Ready;
         if (steamPart) {
             auto st = std::make_unique<net::SteamTransport>();
@@ -445,7 +450,7 @@ void TryStart() {
                 const std::string ip = LocalAddress();
                 if (!how.empty()) how += " ";
                 how += "Join by IP: " + (ip.empty() ? std::string("this PC") : ip) +
-                       (s.port == net::kDefaultPort ? std::string() : ":" + std::to_string(s.port));
+                       (s.port == GetGameInfo().defaultPort ? std::string() : ":" + std::to_string(s.port));
             }
             if (!s.password.empty()) how += " Password protected.";
             Notify("HOSTING CO-OP", how);
@@ -456,7 +461,7 @@ void TryStart() {
         if (steamPending && s.name.empty()) return;
         s.started = true;
         Notify("CO-OP", "Connecting to " + s.address + "...");
-        MakeSession(std::make_unique<net::UdpTransport>());
+        MakeSession(std::make_unique<net::UdpTransport>(UdpOpts()));
         s.target = s.address;
         if (!s.session->Join(s.address)) return Fail("could not join '" + s.address + "': " + s.session->LastError());
         break;
@@ -489,9 +494,10 @@ void Coop::Init() {
         MC_LOG_WARN("coop: unknown transport '%s' (udp|steam); using both", s.transport.c_str());
         s.transport.clear();
     }
-    const int port = cfg.GetInt("port", net::kDefaultPort);
-    if (port < 0 || port > 65535) MC_LOG_WARN("coop: port %d out of range; using %u", port, net::kDefaultPort);
-    s.port = port < 0 || port > 65535 ? net::kDefaultPort : static_cast<uint16_t>(port);
+    const uint16_t defPort = GetGameInfo().defaultPort;
+    const int port = cfg.GetInt("port", defPort);
+    if (port < 0 || port > 65535) MC_LOG_WARN("coop: port %d out of range; using %u", port, defPort);
+    s.port = port < 0 || port > 65535 ? defPort : static_cast<uint16_t>(port);
     if (!cfg.GetBool("steam", true)) s.steam = SteamState::Disabled;
     s.password = cfg.GetString("password");  // host: required; guest: used to join
     s.joinPassword = s.password;
@@ -521,35 +527,13 @@ void Coop::Init() {
     if (s.steam == SteamState::Disabled) MC_LOG_INFO("coop: Steam disabled by config (steam = 0)");
 }
 
-namespace {
-// The enter-vehicle control (keyboard E, pad Y) held in our focused window while no panel of ours takes input.
-bool EnterVehicleHeld() {
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    if (!fg || (GetWindowThreadProcessId(fg, &pid), pid != GetCurrentProcessId())) return false;
-    if (ui_input::Blocking()) return false;
-    constexpr uint16_t kPadY = 0x8000;  // XINPUT_GAMEPAD_Y
-    return (GetAsyncKeyState('E') & 0x8000) != 0 || (ui_input::PadButtons() & kPadY) != 0;
-}
-
-// The aim control (right mouse button, pad left trigger) held in our focused window while no panel takes input.
-// The game itself does not tell scripts whether the player aims (docs/game-api.md 10), so this is read from the input.
-bool AimHeld() {
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    if (!fg || (GetWindowThreadProcessId(fg, &pid), pid != GetCurrentProcessId())) return false;
-    if (ui_input::Blocking()) return false;
-    return (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 || ui_input::PadLeftTrigger() > 60;
-}
-}  // namespace
-
 void Coop::Tick(float dt) {
     State& s = S();
     s.now += dt;
     PollSteam();
     if (!s.started) TryStart();
     if (s.session) s.session->Poll();
-    if (s.session) game::PlayerSync::Tick(dt, EnterVehicleHeld(), AimHeld());
+    if (s.session) GetGameModule().SessionTick(dt);
     if (s.teardown) Teardown();
 }
 
@@ -687,7 +671,7 @@ Coop::Info Coop::GetInfo() {
             row.host = p.id == net::kHostPlayer;
             row.you = p.id == session.LocalId();
             row.pingMs = row.host ? -1 : static_cast<int>(p.rttMs + 0.5f);
-            row.health = game::PlayerSync::Health(p.id);
+            row.health = GetGameModule().PlayerHealth(p.id);
             info.players.push_back(row);
         }
     } else if (s.mode == Mode::JoinLobby) {
@@ -741,7 +725,7 @@ void Coop::GetStatus(std::vector<render::OverlayLine>& out) {
             break;
         }
         if (session.IsActive()) {
-            game::PlayerSync::GetStatus(out);
+            GetGameModule().AppendStatus(out);
             // Ping column: RTT of each player to the host (the host's own row has none).
             for (const auto& p : players) {
                 std::string line = "  " + p.name;

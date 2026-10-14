@@ -1,6 +1,6 @@
 #pragma once
 // Line logger: timestamp + thread id, every line written straight to the file (no user-mode buffering).
-// File: <dir>\mafiacoop.log, previous run rotated to mafiacoop.log.1.
+// File: <dir>\<fileName>, previous run rotated to <fileName>.1.
 #include <cstdarg>
 #include <string>
 
@@ -9,7 +9,7 @@ namespace mc::core::log {
 enum class Level { Debug, Info, Warn, Error };
 
 // Opens <dir>\<fileName> (creating <dir>), rotating an existing file to <fileName>.1. Safe to call once.
-bool Init(const std::wstring& dir, const wchar_t* fileName = L"mafiacoop.log");
+bool Init(const std::wstring& dir, const wchar_t* fileName);
 void Shutdown();
 bool IsOpen();
 

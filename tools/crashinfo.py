@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""MafiaCoop crash triage: read a minidump written by the dll's crash handler and print what happened.
+"""Crash triage: read a minidump written by the mod dll's crash handler (core/crash.h) and print what happened.
 
-Usage:
+Usage (from a game repo's root: python external\\core\\tools\\crashinfo.py ...):
     python tools\\crashinfo.py [DUMP | --latest] [--log FILE] [--symbols DIR]... [--force-symbols]
                                [--all-threads] [--max-frames N] [--no-scan]
 
-DUMP defaults to the newest out\\logs\\crash-*.dmp (same as --latest). Prints:
+out\\ is the build output: the out\\ in the current directory if there is one (run it from the game repo's root),
+else the out\\ next to this tools folder. DUMP defaults to the newest out\\logs\\crash-*.dmp (same as --latest).
+Prints:
   - exception code, flags, address and access-violation details,
   - the faulting module + offset and the registers,
   - the faulting thread's stack, unwound with the x64 unwind data (.pdata/.xdata) of the module images on disk;
@@ -16,7 +18,7 @@ DUMP defaults to the newest out\\logs\\crash-*.dmp (same as --latest). Prints:
   - the crash block of the matching log (found automatically by the dump's file name, or --log).
 
 A PDB is only used when its image's CodeView signature (GUID + age) matches the module recorded in the dump: a
-rebuilt mafiacoop.dll no longer matches an older dump. --force-symbols uses the PDB anyway (marked "unverified";
+rebuilt mod dll no longer matches an older dump. --force-symbols uses the PDB anyway (marked "unverified";
 only meaningful if the code layout did not change, e.g. the same commit rebuilt). Keep the out\\ folder (or the
 release's PDBs) of a build if its dumps need triage later.
 
@@ -36,7 +38,8 @@ import uuid
 from dataclasses import dataclass, field
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.normpath(os.path.join(HERE, "..", "out"))
+OUT_DIR = (os.path.abspath("out") if os.path.isdir("out")
+           else os.path.normpath(os.path.join(HERE, "..", "out")))
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Minidump reader (MINIDUMP_* structures from minidumpapiset.h)
@@ -825,7 +828,7 @@ def print_log_block(log_path: str, dump_path: str) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Summarise a MafiaCoop crash dump.")
+    ap = argparse.ArgumentParser(description="Summarise a mod crash dump.")
     ap.add_argument("dump", nargs="?", help="crash .dmp (default: newest out\\logs\\crash-*.dmp)")
     ap.add_argument("--latest", action="store_true", help="use the newest out\\logs\\crash-*.dmp")
     ap.add_argument("--log", help="log file with the crash block (default: found by the dump's name)")

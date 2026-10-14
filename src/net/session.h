@@ -1,4 +1,4 @@
-// MafiaCoop net: co-op session over any Transport. Host-authoritative star: guests talk only to the host,
+// net: co-op session over any Transport. Host-authoritative star: guests talk only to the host,
 // the host relays. Handshake, player list, ping, chat and generic app messages. See docs/protocol.md.
 #pragma once
 #include <array>
@@ -37,6 +37,7 @@ struct SessionConfig {
     uint32_t modBuild = 0;
     std::string playerName = "Player";
     std::string playerModel;  // spawn profile we appear as, sent in Hello ("" = default by player id)
+    std::string modName = "mod";  // for messages ("Both players need the same <modName> version.")
     int maxPlayers = kMaxPlayers;
     double pingIntervalS = 1.0;
     double helloTimeoutS = 5.0;   // host: drop a connection that has not sent Hello
