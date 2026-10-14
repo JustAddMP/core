@@ -193,7 +193,8 @@ DWORD WINAPI InitThread(LPVOID) {
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         mc::_module = module;
-        DisableThreadLibraryCalls(module);
+        // No DisableThreadLibraryCalls: every thread gets a stack reserve for the crash handler (core/crash.h).
+        mc::core::crash::ReserveThreadStack();
         // Tell the launcher the dll is in (event created by the launcher; absent when injected otherwise).
         const std::wstring name = mc::core::KernelName(L"Injected-" + std::to_wstring(GetCurrentProcessId()));
         if (HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, name.c_str())) {
@@ -201,6 +202,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             CloseHandle(ev);
         }
         if (HANDLE t = CreateThread(nullptr, 0, mc::InitThread, nullptr, 0, nullptr)) CloseHandle(t);
+    } else if (reason == DLL_THREAD_ATTACH) {
+        mc::core::crash::ReserveThreadStack();
     }
     return TRUE;
 }

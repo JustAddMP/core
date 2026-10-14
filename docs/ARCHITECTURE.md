@@ -49,7 +49,7 @@ src/
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
 tests/                    net_loopback, net_password, net_interest, net_fuzz, proxy_test, pending_join,
-                          steam_smoke (manual)
+                          crash_dump, steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py
 docs/                     ARCHITECTURE.md (this), protocol.md (sessions + transports), interest.md
@@ -96,7 +96,11 @@ hooks itself) are the game layer's business: core only calls the points above.
   co-op UI and the overlay.
 - Hand-over between the render thread and any game thread the game layer uses is the game layer's job (one mutex per
   subsystem, held only for copies, is the pattern).
-- Crash dumps: `<dll dir>\logs\crash-<time>.dmp`; `tools\crashinfo.py` reads them.
+- Crash dumps: `<dll dir>\logs\crash-<time>.dmp`, one per process, only for an exception that ends the process
+  (unhandled, or heap corruption / stack buffer overrun); handled first-chance exceptions never use it up. DllMain
+  keeps 64 KB of stack back on every thread (>= 1 MB stacks) so an unhandled stack overflow still reaches the
+  handler; on a thread without that reserve a stack overflow gives `crash-<time>-firstchance.dmp` instead (it may
+  still be caught). `tools\crashinfo.py` reads them.
 
 ## Networking
 

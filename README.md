@@ -43,6 +43,7 @@ out\net_password.exe         session password (right / wrong / missing / attempt
 out\net_interest.exe         interest management
 out\net_fuzz.exe             malformed packets against session and UDP transport
 out\pending_join.exe         Steam join requests are handed to the next tick, never acted on mid-poll
+out\crash_dump.exe           crash handler: one minidump for the real crash, none for handled exceptions
 out\proxy_test.exe           version.dll proxy + launcher --install/--uninstall against a fake game folder
 out\steam_smoke.exe <copy of steam_api64.dll>    manual: needs Steam running (app 480, Spacewar)
 ```
