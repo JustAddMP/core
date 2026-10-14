@@ -49,3 +49,20 @@ out\steam_smoke.exe <copy of steam_api64.dll>    manual: needs Steam running (ap
 Every test exits 0 on success. The test binaries (`mc_test_launcher.exe`, `mc_test.dll`, `mc_test_proxy.dll`) are
 built for a made-up game (`tests\support\test_game_info.cpp`), so nothing touches a real game install.
 Flags: C++20, `/MT`, `/O2 /Zi` with full PDBs, `/W4 /permissive-` (warning-free); MinHook as C at `/W3`.
+
+## Versions
+
+Core is released as git tags `vMAJOR.MINOR.PATCH` (current version in `include/mc/core_version.h`, history in
+[CHANGELOG.md](CHANGELOG.md)). Each game repo pins its `external/core` submodule to one tag, so a core change never
+reaches a game until that game is updated on purpose, and a game can always go back to its last working tag.
+
+- **Patch** (0.1.0 → 0.1.1): bug fixes only, no interface change. Always safe to update.
+- **Minor** (0.1 → 0.2): new features; existing games keep building and working without changes.
+- **Major** (→ 1.0, 1.x → 2.0): changes that need game repos to update their code (game interface, descriptor,
+  build layout). Listed as **Breaking** in the changelog.
+- While core is 0.x, a minor release may still contain breaking changes; the changelog marks them.
+- The network protocol version is separate (`net::kProtocolVersion`); players must run the same game mod version
+  anyway, which pins one core version.
+
+Making a release: update `include/mc/core_version.h` and `CHANGELOG.md`, build and run all tests, commit, then
+`git tag -a vX.Y.Z -m "core vX.Y.Z"` and push the tag. Game repos then move to it with their `tools\update_core.cmd`.

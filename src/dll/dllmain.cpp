@@ -1,5 +1,6 @@
 // Mod dll entry. DllMain only signals the launcher and spawns the init thread; all setup happens there. The game
 // layer (mc/game_module.h) is initialised from the init thread.
+#include "mc/core_version.h"
 #include "core/config.h"
 #include "core/crash.h"
 #include "core/hook.h"
@@ -101,7 +102,8 @@ void LogEnvironment(const std::wstring& dir) {
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     const auto& main = core::mem::MainModule();
-    MC_LOG_INFO("%s %s, built " __DATE__ " " __TIME__, GetGameInfo().modName, GetGameInfo().modVersion);
+    MC_LOG_INFO("%s %s (core %s), built " __DATE__ " " __TIME__, GetGameInfo().modName, GetGameInfo().modVersion,
+                kCoreVersion);
     MC_LOG_INFO("pid %lu, exe %s", GetCurrentProcessId(), Narrow(exe).c_str());
     MC_LOG_INFO("main module base 0x%llx size 0x%zx timestamp 0x%08x, .text 0x%llx+0x%zx",
                 static_cast<unsigned long long>(main.base), main.size, main.timeDateStamp,

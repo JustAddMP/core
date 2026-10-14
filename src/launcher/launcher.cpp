@@ -11,6 +11,7 @@
 // --check-only does only that, prints the result and exits with 0 (supported), 2 (unsupported) or 1 (error).
 // --install / --uninstall add or remove the optional "start from Steam" files in the game folder (install.cpp);
 // --yes skips their confirmation dialog and prints the result instead (scripts, tests).
+#include "mc/core_version.h"
 #include "core/names.h"
 #include "launcher/install.h"
 #include "mc/game_info.h"
@@ -532,7 +533,8 @@ int Run() {
         logName = L"launcher-" + std::to_wstring(GetCurrentProcessId()) + L".log";
     CreateDirectoryW((selfDir + L"\\logs").c_str(), nullptr);
     _wfopen_s(&_log, (selfDir + L"\\logs\\" + logName).c_str(), L"w, ccs=UTF-8");
-    Log(L"%s %s launcher, built " __DATE__ " " __TIME__, modName.c_str(), core::AsciiW(Gi().modVersion).c_str());
+    Log(L"%s %s launcher (core %s), built " __DATE__ " " __TIME__, modName.c_str(), core::AsciiW(Gi().modVersion).c_str(),
+        core::AsciiW(kCoreVersion).c_str());
     for (auto& [k, v] : passEnv)  // the session password is never written to a log
         Log(L"arg: %s=%s", k.c_str(), k == envPrefix + L"PASSWORD" ? L"(hidden)" : v.c_str());
     if (!gameArgs.empty()) Log(L"arg: game command line extra:%s", gameArgs.c_str());
