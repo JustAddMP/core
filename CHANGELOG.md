@@ -3,9 +3,9 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
-## v0.1.1 — 2026-10-15
+## v0.2.0 — 2026-10-15
 
-Stability fixes. No breaking changes: game repos update without code changes (the additions below are optional).
+Stability fixes plus a few small optional additions to the interface (so a minor release). No breaking changes: game repos update without code changes.
 
 - Steam joins: an invite / "Join Game" request is only recorded in the Steam callback (which can run inside
   `Session::Poll`) and acted on at the start of the next `Coop::Tick`, so the session is never torn down while it is
