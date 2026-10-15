@@ -95,6 +95,9 @@ public:
     virtual bool StartMode(int /*mode*/) { return false; }
     // The local player is in a loaded world (not the main menu / a loading screen).
     virtual bool InWorld() { return false; }
+    // The lobby may open by itself now (after joining a host): e.g. the game's main menu is up, not a title or
+    // loading screen that needs a key press first. Asked every frame until it says yes.
+    virtual bool LobbyCanOpen() { return true; }
     // The mode the local player is playing (index into LobbyModes), -1 = none / not one of them.
     virtual int CurrentMode() { return -1; }
     // What the lobby shows as a player's character ("" = nothing).

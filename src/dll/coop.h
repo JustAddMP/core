@@ -97,6 +97,7 @@ public:
         int hostGameMode = -1;     // ... this mode
         bool allReady = true;      // every guest is ready
         bool ready = false;        // we are ready (guest)
+        uint32_t starts = 0;       // lobby starts seen (the lobby panel closes when it changes)
     };
     static Info GetInfo();
 

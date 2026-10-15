@@ -84,6 +84,7 @@ struct UiState {
     Coop::Info info;
     float mouseX = -1, mouseY = -1;
     bool compatChecked = false;
+    uint32_t starts = 0;  // Coop::Info::starts last frame
 };
 
 UiState& U() {
@@ -1052,6 +1053,10 @@ void CoopUi::Tick(float dt) {
         ShowCompatBanner();
     }
     u.info = Coop::GetInfo();
+    if (u.info.starts != u.starts) {  // the host started a game: everybody's lobby closes, the game loads
+        u.starts = u.info.starts;
+        if (u.panel == Panel::Lobby) Close();
+    }
 
     // native menu entries (the game module patches them into the game's menus): publish state, run their commands
     GameModule& game = GetGameModule();

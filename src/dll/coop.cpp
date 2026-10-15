@@ -107,6 +107,7 @@ struct State {
     std::string hostName;         // guest: the host's name (for "host left")
     std::string steamLobbyState;  // host: last mc_state/mc_mode written to the Steam lobby
     bool shutDown = false;
+    uint32_t lobbyStarts = 0;     // OnLobbyStart calls (the UI closes the lobby panel on a change)
 };
 
 State& S() {
@@ -253,6 +254,7 @@ void OnLobbyStart(int mode) {
                                  ? modes[static_cast<size_t>(mode)].name
                                  : "mode " + std::to_string(mode);
     MC_LOG_INFO("coop: lobby start: %s (mode %d)", name.c_str(), mode);
+    ++S().lobbyStarts;
     if (GetGameModule().StartMode(mode)) {
         Notify("CO-OP", "Starting " + name + "...");
     } else {
@@ -808,6 +810,11 @@ bool Coop::JoinRunningGame() {
 bool Coop::PopOpenLobby() {
     State& s = S();
     if (!s.openLobby) return false;
+    if (!s.session || GetGameModule().InWorld()) {  // gone, or dropped into the world in the meantime
+        s.openLobby = false;
+        return false;
+    }
+    if (!GetGameModule().LobbyCanOpen()) return false;  // e.g. still at the title screen: ask again next frame
     s.openLobby = false;
     return true;
 }
@@ -862,6 +869,7 @@ Coop::Info Coop::GetInfo() {
         info.hostGameMode = s.gameLobby.GameMode();
         info.allReady = s.gameLobby.AllReady();
         info.ready = s.gameLobby.Ready(session.LocalId());
+        info.starts = s.lobbyStarts;
     } else if (s.mode == Mode::JoinLobby) {
         info.phase = Phase::Joining;
     } else if (s.mode != Mode::None) {
