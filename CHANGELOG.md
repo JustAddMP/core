@@ -3,6 +3,27 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.4.0 — 2026-10-15
+
+Game settings in the CO-OP panel, saving settings, a virtual gamepad for tests (new features, so a minor release). No
+breaking changes: game repos update without code changes; the new interface calls are optional. No wire protocol
+change.
+
+- GameModule: optional `PanelOptions(rows)` / `PanelOptionStep(index, delta)`. The pause CO-OP panel shows each row as
+  "LABEL  < VALUE >" in every session state (also without a session); Left/Right and the pad d-pad step it, Enter,
+  pad A and a click step it forward, and the key hints show "Left/Right Change" on such a row. Mafia DE uses it for
+  the player's CHARACTER and OUTFIT.
+- Config: `Set(key, value)` changes a value for the process (it then wins over the file and the launcher's environment
+  overrides) and saves it into the settings file: the first line for that key is replaced, everything else is kept,
+  a missing key is appended, a missing file is created (written next to it and moved over it). Config is now
+  thread-safe. New test `config_set`.
+- ui_input: a test pad (`EnableTestPad`, `SetTestPad(state, holdMs)`): a virtual XInput gamepad on user 0 (also
+  reported by `XInputGetCapabilities`, which is now hooked too), on top of a real pad's state, read by the game and by
+  our panels. Off unless `test_pad = 1` / `--test_pad 1`. Synthetic mouse clicks never reach some games; a pad does.
+- CO-OP panel fix: only a real mouse move selects the row under the cursor. A game that keeps the cursor at the
+  window centre sends mouse moves to the same spot every frame, which pinned the selection to the row under the centre
+  and undid every keyboard and pad step.
+
 ## v0.3.0 — 2026-10-15
 
 Kick and kick-and-ban (new features, so a minor release). No breaking changes: game repos update without code

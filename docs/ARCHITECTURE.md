@@ -27,10 +27,11 @@ patterns and struct offsets never go into core: they belong to the game repo, wh
 build.cmd                 core libraries + test binaries + tests (see README.md); tools\msvc.cmd: toolchain + flags
 include/mc/
   game_info.h             GameInfo: the game descriptor (names, Steam app id, supported exe builds, proxy names)
-  game_module.h           GameModule: the dll-side game interface; MenuCommand/MenuState for native menu entries
+  game_module.h           GameModule: the dll-side game interface; MenuCommand/MenuState for native menu entries,
+                          PanelOption for game settings in the CO-OP panel
 src/
   core/                   log, crash (minidump + log on unhandled exception), hook (MinHook wrapper), config (ini +
-                          <envPrefix>KEY overrides), mem (module info, pattern scan, RIP-relative resolve), compat
+                          <envPrefix>KEY overrides; Set() saves a value back into the ini), mem (module info, pattern scan, RIP-relative resolve), compat
                           (features missing on this game build -> banner), names.h (env/kernel names from GameInfo)
   net/                    transport.h (interface), udp_transport (own reliability), steam_transport (ISteamNetworking
                           P2P, flat API), multi_transport, steam_flat (bindings), steam_lobby, session (host-
@@ -44,7 +45,8 @@ src/
                           invites / password / kick), coop_ui (pause co-op panel with kick / kick and ban, join-by-IP and password boxes,
                           banners),
                           ui_input (panel input; blocks the game's DirectInput/XInput/window input while a panel is
-                          open), window_place (--window left|right)
+                          open; test pad: a virtual XInput gamepad for automated tests, test_pad = 1), window_place
+                          (--window left|right)
   launcher/               launcher (find the game via Steam, CRC check against GameInfo::builds, start suspended,
                           inject, pass --key value as <envPrefix>KEY), args.h (argument parsing; keys that need a
                           value, e.g. --password, refuse to start without one), install (--install / --uninstall)
@@ -82,6 +84,7 @@ Namespaces: `mc` (GameInfo, GameModule, Mod, Coop, CoopUi), `mc::core`, `mc::net
 | `PlayerHealth(id)` | render | players panel (optional; -1 = no column) |
 | `AppendStatus(lines)` | render | debug status text, F7 (optional) |
 | `SetMenuState(state)` / `PopMenuCommand(&cmd)` | render | every frame: the game's native menu entries (optional) |
+| `PanelOptions(rows)` / `PanelOptionStep(index, delta)` | render | every frame while the CO-OP panel is open: game settings shown as "LABEL  < VALUE >" rows (e.g. the player's character); Left/Right, pad d-pad, Enter/A/click step them (optional) |
 
 Features that cannot work on the running exe report to `core::compat::Failed(name, required)`; a required one
 disables co-op with a banner, an optional one only shows the banner. The game's own threads (e.g. a script-VM tick it
