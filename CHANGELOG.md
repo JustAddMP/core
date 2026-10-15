@@ -3,6 +3,27 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.3.0 — 2026-10-15
+
+Kick and kick-and-ban (new features, so a minor release). No breaking changes: game repos update without code
+changes; everything new in the interfaces is additive. The wire protocol changes (`kProtocolVersion` 6), so players
+need the same build anyway.
+
+- Session: host-only `Kick(id, reason)` and `KickAndBan(id, reason)`. The kicked guest gets a reliable Kicked
+  message (0x0C) with the reason and is dropped after the same 1 s linger as a Reject; its `onDisconnected` gets
+  "You were kicked by the host[: reason]" (`WasKicked()` / `WasBanned()`), the other guests get PeerLeft "kicked by
+  the host". Guests cannot kick (the API refuses, a Kicked sent to the host is ignored).
+- Ban list for the hosted session (`BanList()`, `Unban(index)`, `ClearBans()`), keyed by the peer's address (UDP IP
+  without the port) and its SteamID (new optional `Transport::PeerSteamId`, implemented by the Steam and multi
+  transports). A banned Hello gets Reject 7 "You are banned from this session" (`RejectReason::Banned`). `Leave()`
+  and every `Host()` clear the list.
+- Co-op UI: in the pause CO-OP panel the host can select a guest in the player list (keyboard up/down, mouse,
+  gamepad) and choose KICK or KICK AND BAN, confirmed with "Kick <name>? Enter = yes, Esc = no". Guests see the
+  banner "You were kicked by the host" / "You are banned from this session" and go back to idle.
+  `Coop::Kick`, `Coop::BanList`, `Coop::Unban`; `Coop::PlayerRow::id`. No new `MenuCommand`.
+- Tests: new `net_kick` (reason delivered under loss, PeerLeft to the others, guests cannot kick, ban by address and
+  by SteamID through a test transport, unban, ban list cleared by a new session, kicked-not-banned rejoin).
+
 ## v0.2.0 — 2026-10-15
 
 Stability fixes plus a few small optional additions to the interface (so a minor release). No breaking changes: game repos update without code changes.
