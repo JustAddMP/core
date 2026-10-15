@@ -32,6 +32,7 @@ enum Msg : uint8_t {
     kPingTable = 0x09,
     kChallenge = 0x0A,
     kAuth = 0x0B,
+    kKicked = 0x0C,
     kApp = 0x10,
 };
 
@@ -42,6 +43,12 @@ enum RejectCode : uint8_t {
     kRejectPasswordRequired = 4,
     kRejectWrongPassword = 5,
     kRejectTooManyAttempts = 6,
+    kRejectBanned = 7,
+};
+
+enum KickCode : uint8_t {
+    kKickOnly = 1,
+    kKickBanned = 2,
 };
 
 constexpr uint8_t kAppFlagReliable = 0x01;
@@ -58,6 +65,19 @@ std::string CleanName(std::string s) {
     while (!s.empty() && s.back() == ' ') s.pop_back();
     while (!s.empty() && s.front() == ' ') s.erase(s.begin());
     return s.empty() ? std::string("Player") : s;
+}
+
+// Free text from the other side or for the wire (reasons): control characters become spaces, at most maxLen bytes
+// (cut at a UTF-8 character boundary).
+std::string CleanText(std::string s, size_t maxLen) {
+    for (char& c : s)
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) c = ' ';
+    if (s.size() > maxLen) {
+        size_t cut = maxLen;
+        while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+        s.resize(cut);
+    }
+    return s;
 }
 
 // A spawn profile name ("visuals/hero/game_main_tommy_casual") or a short alias ("paulie"): letters, digits, '_',
@@ -102,6 +122,8 @@ bool Session::Host(uint16_t port) {
     Reset();
     lastError_.clear();
     lastReject_ = RejectReason::None;
+    kicked_ = 0;
+    bans_.clear();  // a new hosted session starts with an empty ban list
     if (!transport_.Host(port)) {
         lastError_ = "could not start hosting";
         state_ = SessionState::Disconnected;
@@ -119,6 +141,7 @@ bool Session::Join(std::string_view address) {
     Reset();
     lastError_.clear();
     lastReject_ = RejectReason::None;
+    kicked_ = 0;
     lastJoinAddress_ = std::string(address);
     hostPeer_ = transport_.Connect(address);
     if (!hostPeer_) {
@@ -144,6 +167,7 @@ void Session::Leave() {
         for (auto& p : players_)
             if (p.id != kHostPlayer) transport_.Disconnect(p.peer);
         for (auto& kv : pending_) transport_.Disconnect(kv.first);
+        bans_.clear();  // the ban list lives as long as the hosted session
     } else if (hostPeer_) {
         transport_.Disconnect(hostPeer_);
     }
@@ -302,6 +326,10 @@ void Session::HostOnHello(PeerId peer, ByteReader& r) {
     std::string model = r.Str(kMaxModelLen);
     if (!r.Ok() || magic != kHelloMagic) {
         Reject(peer, kRejectBadHello, "invalid handshake");
+        return;
+    }
+    if (IsBanned(peer)) {
+        Reject(peer, kRejectBanned, "You are banned from this session");
         return;
     }
     if (proto != cfg_.protocolVersion || build != cfg_.modBuild) {
@@ -464,6 +492,65 @@ void Session::HostRemovePlayer(PeerId peer, const std::string& reason) {
     BroadcastRaw(w, Reliability::Reliable, kNoPlayer);
     Log(kInfo, "session: player %u '%s' left: %s", info.id, info.name.c_str(), reason.c_str());
     if (onPlayerLeft) onPlayerLeft(info, reason);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// kick / ban (host)
+
+bool Session::Kick(PlayerId id, std::string_view reason) { return KickImpl(id, reason, false); }
+bool Session::KickAndBan(PlayerId id, std::string_view reason) { return KickImpl(id, reason, true); }
+
+bool Session::KickImpl(PlayerId id, std::string_view reasonIn, bool ban) {
+    if (state_ != SessionState::Hosting || id == kHostPlayer) return false;
+    const PlayerInfo* p = FindPlayer(id);
+    if (!p) return false;
+    const PeerId peer = p->peer;
+    const std::string name = p->name;
+    const std::string reason = CleanText(std::string(reasonIn), kMaxReasonLen);
+    if (ban) {
+        BanEntry b{name, transport_.PeerAddress(peer), transport_.PeerSteamId(peer)};
+        if (b.address.empty() && b.steamId == 0) {
+            Log(kWarn, "session: player %u '%s' has no address or SteamID; the ban cannot match a rejoin", id,
+                name.c_str());
+        } else {
+            Log(kInfo, "session: banned '%s' (address '%s', SteamID %llu)", name.c_str(), b.address.c_str(),
+                static_cast<unsigned long long>(b.steamId));
+            bans_.push_back(std::move(b));
+        }
+    }
+    Log(kInfo, "session: kicking player %u '%s'%s%s%s", id, name.c_str(), ban ? " with a ban" : "",
+        reason.empty() ? "" : ": ", reason.c_str());
+    ByteWriter w(reason.size() + 8);
+    w.U8(kKicked);
+    w.U8(ban ? kKickBanned : kKickOnly);
+    w.Str(reason);
+    SendRaw(peer, w, Reliability::Reliable);
+    std::string left = ban ? "kicked and banned by the host" : "kicked by the host";
+    if (!reason.empty()) left += ": " + reason;
+    HostRemovePlayer(peer, CleanText(left, kMaxReasonLen));  // PeerLeft to the others, onPlayerLeft
+    // Like a Reject: keep the connection for kRejectLinger so the notice is delivered, ignore what it sends, then
+    // drop it (Poll). The guest normally disconnects first when the notice arrives.
+    Pending& pend = pending_[peer];
+    pend = Pending{};
+    pend.since = Now();
+    pend.kickAt = pend.since + kRejectLinger;
+    return true;
+}
+
+bool Session::IsBanned(PeerId peer) const {
+    if (bans_.empty()) return false;
+    const std::string address = transport_.PeerAddress(peer);
+    const uint64_t steamId = transport_.PeerSteamId(peer);
+    for (const BanEntry& b : bans_)
+        if ((!address.empty() && b.address == address) || (steamId != 0 && b.steamId == steamId)) return true;
+    return false;
+}
+
+bool Session::Unban(size_t index) {
+    if (index >= bans_.size()) return false;
+    Log(kInfo, "session: unbanned '%s'", bans_[index].name.c_str());
+    bans_.erase(bans_.begin() + static_cast<std::ptrdiff_t>(index));
+    return true;
 }
 
 void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
@@ -655,7 +742,7 @@ void Session::GuestOnMessage(ByteReader& r) {
         } else if (type == kReject) {
             const uint8_t code = r.U8();
             std::string reason = r.Str(kMaxReasonLen);
-            lastReject_ = code >= 1 && code <= 6 ? static_cast<RejectReason>(code) : RejectReason::None;
+            lastReject_ = code >= 1 && code <= 7 ? static_cast<RejectReason>(code) : RejectReason::None;
             Fail("rejected by host: " + (reason.empty() ? std::string("no reason given") : reason));
         }
         return;
@@ -683,6 +770,16 @@ void Session::GuestOnMessage(ByteReader& r) {
             players_.erase(it);
             if (onPlayerLeft) onPlayerLeft(info, reason);
             break;
+        }
+        case kKicked: {
+            const uint8_t code = r.U8();
+            const std::string reason = CleanText(r.Str(kMaxReasonLen), kMaxReasonLen);
+            if (!r.Ok()) return;
+            kicked_ = code == kKickBanned ? 2 : 1;
+            std::string why = kicked_ == 2 ? "You were kicked and banned by the host" : "You were kicked by the host";
+            if (!reason.empty()) why += ": " + reason;
+            Fail(why);  // disconnects from the host; onDisconnected(why), WasKicked()
+            return;
         }
         case kPing: {
             uint32_t t = r.U32();

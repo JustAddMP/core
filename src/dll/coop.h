@@ -46,9 +46,16 @@ public:
     // can ask for one and call RetryWithPassword.
     static bool PopPasswordPrompt();
     static void RetryWithPassword(const std::string& password);  // repeats the last join with this password
+    // Host: kick a guest (ban = also refuse its rejoins for the rest of this hosted session; net::Session::Kick /
+    // KickAndBan). False when not hosting or the player is gone.
+    static bool Kick(uint8_t playerId, bool ban);
+    // Host: names on this session's ban list (empty when not hosting), and Unban by index into it.
+    static std::vector<std::string> BanList();
+    static bool Unban(size_t index);
 
     enum class Phase { Idle, Starting, Hosting, Joining, Connected };
     struct PlayerRow {
+        uint8_t id = 0;  // net::PlayerId (0 = host)
         std::string name;
         int pingMs = -1;  // -1 = none (the host's own row)
         int health = -1;  // 0..100, -1 = unknown (not in the world yet)

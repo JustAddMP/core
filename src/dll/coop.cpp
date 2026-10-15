@@ -266,7 +266,8 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     };
     session.onPlayerLeft = [](const net::PlayerInfo& p, const std::string& reason) {
         MC_LOG_INFO("coop: player %u '%s' left: %s", p.id, p.name.c_str(), reason.c_str());
-        Notify("CO-OP", p.name + " left the game");
+        const bool kicked = reason.rfind("kicked", 0) == 0;  // "kicked by the host" / "kicked and banned by the host"
+        Notify("CO-OP", kicked ? p.name + " was " + reason : p.name + " left the game");
         GetGameModule().OnPlayerLeft(p.id);
     };
     session.onChat = [](net::PlayerId from, const std::string& text) {
@@ -285,6 +286,10 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
             st.retryMode = st.mode;
         } else if (rr == net::RejectReason::TooManyAttempts) {
             Notify("CO-OP", "Too many wrong passwords. Try again in a minute.", true);
+        } else if (rr == net::RejectReason::Banned) {
+            Notify("CO-OP", "You are banned from this session", true);
+        } else if (st.session && st.session->WasKicked()) {
+            Notify("CO-OP", reason, true);  // "You were kicked by the host[: reason]"
         } else {
             Notify("CO-OP", "Disconnected: " + reason, true);
         }
@@ -658,6 +663,30 @@ void Coop::RetryWithPassword(const std::string& password) {
     }
 }
 
+bool Coop::Kick(uint8_t playerId, bool ban) {
+    State& s = S();
+    if (!s.session || !s.session->IsHost()) return false;
+    const net::PlayerInfo* p = s.session->FindPlayer(playerId);
+    const std::string name = p ? p->name : std::string();
+    const bool ok = ban ? s.session->KickAndBan(playerId) : s.session->Kick(playerId);
+    MC_LOG_INFO("coop: %s player %u '%s' from the menu: %s", ban ? "kick and ban" : "kick", playerId, name.c_str(),
+                ok ? "done" : "no such player");
+    return ok;
+}
+
+std::vector<std::string> Coop::BanList() {
+    State& s = S();
+    std::vector<std::string> out;
+    if (s.session && s.session->IsHost())
+        for (const auto& b : s.session->BanList()) out.push_back(b.name);
+    return out;
+}
+
+bool Coop::Unban(size_t index) {
+    State& s = S();
+    return s.session && s.session->IsHost() && s.session->Unban(index);
+}
+
 Coop::Info Coop::GetInfo() {
     State& s = S();
     Info info;
@@ -681,6 +710,7 @@ Coop::Info Coop::GetInfo() {
             info.target = host->name;
         for (const auto& p : session.Players()) {
             PlayerRow row;
+            row.id = p.id;
             row.name = p.name;
             row.host = p.id == net::kHostPlayer;
             row.you = p.id == session.LocalId();

@@ -40,6 +40,8 @@ is not on PATH). No CMake.
 build.cmd                    core libraries, test binaries and tests -> out\
 out\net_loopback.exe         two sessions over UDP in one process, with loss/latency/duplicates
 out\net_password.exe         session password (right / wrong / missing / attempt limit)
+out\net_kick.exe             kick and kick-and-ban (reason delivered, PeerLeft, guests cannot kick, bans by
+                             address and SteamID, ban list cleared by a new session)
 out\net_interest.exe         interest management
 out\net_fuzz.exe             malformed packets against session and UDP transport
 out\pending_join.exe         Steam join requests are handed to the next tick, never acted on mid-poll

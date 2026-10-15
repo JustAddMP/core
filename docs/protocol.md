@@ -21,7 +21,7 @@ raises no event; remote close, timeout, refused and failed connects raise `Disco
 
 | Value | Where | Rule |
 |---|---|---|
-| `kProtocolVersion` (session.h, currently 5; 5 added the session password) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
+| `kProtocolVersion` (session.h, currently 6; 5 added the session password, 6 Kicked and the ban Reject) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
 | `modBuild` (SessionConfig, derived by the dll from `GameInfo::modVersion`, "1.2.3" -> 10203) | Hello | Must match exactly (sync code must be identical on both sides). |
 | UDP wire version (byte 2 of every datagram, currently 1) | UDP header | Datagrams with another version are ignored. Bump only if the UDP framing changes. |
 | Lobby data `mc_version` / `mc_proto` | Steam lobby | Informational (shown before connecting); the Hello check is authoritative. |
@@ -37,7 +37,7 @@ Every transport message starts with a one-byte session message type.
 |---|---|---|---|---|
 | 0x01 | Hello | G->H | R | u32 magic `0x504F434D` ("MCOP"), u32 protocolVersion, u32 modBuild, str name (<= 32 bytes used) |
 | 0x02 | Welcome | H->G | R | u8 yourId, u8 maxPlayers, u8 count, count x {u8 id, str name} (includes host and you) |
-| 0x03 | Reject | H->G | R | u8 code (1 version, 2 full, 3 bad handshake, 4 password required, 5 wrong password, 6 too many attempts), str reason (human readable) |
+| 0x03 | Reject | H->G | R | u8 code (1 version, 2 full, 3 bad handshake, 4 password required, 5 wrong password, 6 too many attempts, 7 banned), str reason (human readable) |
 | 0x04 | PeerJoined | H->G | R | u8 id, str name |
 | 0x05 | PeerLeft | H->G | R | u8 id, str reason ("closed by remote", "timed out", ...) |
 | 0x06 | Ping | both | U | u32 sender time ms |
@@ -46,6 +46,7 @@ Every transport message starts with a one-byte session message type.
 | 0x09 | PingTable | H->G | U | u8 count, count x {u8 id, u16 rtt ms} (every 2 s, for a ping display) |
 | 0x0A | Challenge | H->G | R | 32 random bytes (only when the host has a password; see "Session password") |
 | 0x0B | Auth | G->H | R | u8 has (0 = guest has no password), then if has: 32-byte HMAC-SHA256 answer |
+| 0x0C | Kicked | H->G | R | u8 code (1 kicked, 2 kicked and banned), str reason (<= 256, may be empty); see "Kick and ban" |
 | 0x10 | App | both | R/U | varint appId, u8 from, u8 target, u8 flags (bit0 = sent reliable), payload (rest) |
 
 Handshake: transport connects -> guest sends Hello -> host replies Welcome (and broadcasts PeerJoined to the
@@ -86,6 +87,32 @@ guest                                   host
 - Strength: an observer of one Challenge/Auth pair can try passwords offline against the HMAC, so a password only
   keeps strangers out of a game; it is not an account secret. Use something not reused elsewhere.
 - Crypto: `src/net/auth.{h,cpp}`, Windows BCrypt only (`bcrypt.lib`).
+
+### Kick and ban
+
+Host only (`Session::Kick(id, reason)`, `Session::KickAndBan(id, reason)`; the dll: the pause CO-OP panel, select a
+guest in the player list, KICK or KICK AND BAN, confirm).
+
+```
+host                                      kicked guest                    other guests
+  Kicked{code, reason} --------------->     onDisconnected("You were kicked by the host[: reason]")
+                                            (code 2: "You were kicked and banned by the host[: reason]"),
+                                            WasKicked() / WasBanned(); disconnects from the host
+  PeerLeft{id, "kicked by the host[: reason]"} ---------------------------------->  onPlayerLeft
+  (host: onPlayerLeft too; the connection is kept for 1 s like after a Reject, everything it sends is ignored,
+   then dropped)
+```
+
+- Guests cannot kick: the API returns false unless hosting, there is no guest-to-host kick request, and the host
+  ignores a Kicked (or any unknown type) sent by a guest. App messages relayed between guests keep their App framing,
+  so they can never arrive as a Kicked.
+- Ban list (`Session::BanList()`, `Unban(index)`, `ClearBans()`): KickAndBan records the player's name, its address
+  (`Transport::PeerAddress`: UDP IPv4 without the port) and its SteamID (`Transport::PeerSteamId`: the SteamID64 of a
+  peer that came over Steam, else 0). A Hello from a peer matching either gets `Reject{7 "You are banned from this
+  session"}` (guest: `LastReject() == RejectReason::Banned`). On one PC every UDP guest is 127.0.0.1, so a ban by
+  address refuses all local guests.
+- The list lives as long as the hosted session: `Leave()` and every `Host()` clear it. A kicked but not banned player
+  can rejoin at once.
 
 Ping/Pong: each side pings every 1 s (unreliable). Guests keep their own RTT to the host; the host's PingTable fills
 in the others.

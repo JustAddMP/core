@@ -40,6 +40,7 @@ public:
     bool GetStats(PeerId peer, PeerStats& out) const override;
     bool IsHosting() const override;
     const char* Name() const override { return "steam"; }
+    uint64_t PeerSteamId(PeerId peer) const override { return peer; }  // peer ids are SteamID64s
 
     PeerId LocalId() const;
 

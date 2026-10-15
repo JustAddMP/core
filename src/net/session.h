@@ -16,7 +16,7 @@
 namespace mc::net {
 
 // Bump when the session or any app message format changes incompatibly.
-constexpr uint32_t kProtocolVersion = 5;  // 5: optional session password (Challenge/Auth)
+constexpr uint32_t kProtocolVersion = 6;  // 5: optional session password (Challenge/Auth); 6: Kicked, ban Reject
 
 using PlayerId = uint8_t;
 constexpr PlayerId kHostPlayer = 0;
@@ -78,6 +78,15 @@ enum class RejectReason : uint8_t {
     PasswordRequired = 4,
     WrongPassword = 5,
     TooManyAttempts = 6,
+    Banned = 7,
+};
+
+// Host: one entry of the session ban list (Session::KickAndBan). A rejoin is refused when the new peer matches the
+// address or the SteamID. The list lives as long as the hosted session.
+struct BanEntry {
+    std::string name;      // player name when banned (for a later UI)
+    std::string address;   // UDP: IPv4 without the port ("" = none, e.g. a Steam peer)
+    uint64_t steamId = 0;  // Steam: SteamID64 (0 = the peer did not come over Steam)
 };
 
 enum class SessionState { Idle, Hosting, Connecting, Connected, Disconnected };
@@ -137,6 +146,21 @@ public:
     // Host: peers that count as invited (Steam lobby members). With invitesSkipPassword they are not challenged.
     std::function<bool(PeerId)> isInvitedPeer;
 
+    // ---- kick / ban (host only; docs/protocol.md "Kick and ban") ----
+    // Host: tell player `id` it was kicked (reliable Kicked with `reason`), remove it from the session (the others
+    // get PeerLeft "kicked by the host") and drop its connection once the notice had time to arrive. False when not
+    // hosting, for the host itself or an unknown id. Guests have no way to kick: nothing they send can do it.
+    bool Kick(PlayerId id, std::string_view reason = {});
+    // Host: Kick plus a ban for the rest of this hosted session (by SteamID and by address, whatever the peer has):
+    // its next Hello gets Reject{7 "You are banned from this session"}. Cleared by Leave() / a new Host().
+    bool KickAndBan(PlayerId id, std::string_view reason = {});
+    const std::vector<BanEntry>& BanList() const { return bans_; }
+    bool Unban(size_t index);  // false if out of range
+    void ClearBans() { bans_.clear(); }
+    // Guest: the session ended because the host kicked us (WasBanned: and banned us).
+    bool WasKicked() const { return kicked_ != 0; }
+    bool WasBanned() const { return kicked_ == 2; }
+
     // ---- events ----
     std::function<void()> onJoined;                           // guest: Welcome received
     std::function<void(const PlayerInfo&)> onPlayerJoined;    // someone else joined
@@ -184,6 +208,8 @@ private:
     bool LockedOut(const std::string& key, double now);
     void Reject(PeerId peer, uint8_t code, const std::string& reason);
     void HostRemovePlayer(PeerId peer, const std::string& reason);
+    bool KickImpl(PlayerId id, std::string_view reason, bool ban);
+    bool IsBanned(PeerId peer) const;
     void DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload);
     bool SendRaw(PeerId peer, const ByteWriter& w, Reliability rel);
     bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except);  // false if any send failed
@@ -211,6 +237,8 @@ private:
     double lastRateLog_ = -1e9;
     bool rateLogPending_ = false;
     bool welcomed_ = false;
+    std::vector<BanEntry> bans_;  // host: this hosted session's ban list
+    uint8_t kicked_ = 0;          // guest: 0, 1 kicked, 2 kicked and banned (from the Kicked message)
 };
 
 }  // namespace mc::net

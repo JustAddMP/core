@@ -34,14 +34,15 @@ src/
                           (features missing on this game build -> banner), names.h (env/kernel names from GameInfo)
   net/                    transport.h (interface), udp_transport (own reliability), steam_transport (ISteamNetworking
                           P2P, flat API), multi_transport, steam_flat (bindings), steam_lobby, session (host-
-                          authoritative star, relay, password), wire (byte writer/reader), auth (BCrypt HMAC),
+                          authoritative star, relay, password, kick/ban), wire (byte writer/reader), auth (BCrypt HMAC),
                           interest (interest management, docs/interest.md)
   render/                 present_hook (IDXGISwapChain::Present/ResizeBuffers -> per-frame tick on the render thread),
                           overlay + overlay.hlsl (D3D11 text/rect renderer), ui_font (GDI glyph atlas), font8x16.h
   swf/                    swf_patch: SWF/GFX + AVM2 (ABC) patcher (constant pool append, method prologues, assembler)
                           for games whose menus are Scaleform movies
   dll/                    dllmain (init thread), mod (per-frame tick), coop (sessions: host / join / Steam lobby /
-                          invites / password), coop_ui (pause co-op panel, join-by-IP and password boxes, banners),
+                          invites / password / kick), coop_ui (pause co-op panel with kick / kick and ban, join-by-IP and password boxes,
+                          banners),
                           ui_input (panel input; blocks the game's DirectInput/XInput/window input while a panel is
                           open), window_place (--window left|right)
   launcher/               launcher (find the game via Steam, CRC check against GameInfo::builds, start suspended,
@@ -49,7 +50,7 @@ src/
                           value, e.g. --password, refuse to start without one), install (--install / --uninstall)
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
-tests/                    net_loopback, net_password, net_interest, net_fuzz, proxy_test, pending_join,
+tests/                    net_loopback, net_password, net_kick, net_interest, net_fuzz, proxy_test, pending_join,
                           crash_dump, launcher_args, steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py

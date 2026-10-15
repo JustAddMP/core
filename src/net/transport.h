@@ -77,6 +77,8 @@ public:
     // The session completed its handshake with this incoming peer (a real player now). A full transport may evict
     // incoming connections that never got this far to make room for a new one; it never evicts these. Optional.
     virtual void MarkEstablished(PeerId) {}
+    // The SteamID64 of a peer that connected over Steam, 0 for any other peer (bans key by it). Optional.
+    virtual uint64_t PeerSteamId(PeerId) const { return 0; }
 };
 
 constexpr uint16_t kDefaultPort = 27960;

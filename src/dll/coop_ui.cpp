@@ -39,15 +39,19 @@ struct Toast {
     float age = 0;
 };
 
-enum class Panel { None, PauseCoop, JoinIp, Password };
+// PlayerMenu: what to do with the guest picked in the CO-OP panel's player list (host only); ConfirmKick: "Kick
+// <name>?" before it happens.
+enum class Panel { None, PauseCoop, JoinIp, Password, PlayerMenu, ConfirmKick };
 enum class Action {
-    None, Host, Invite, JoinFriend, JoinIp, Leave, Back, Connect, SetPassword, ClearPassword, SubmitPassword
+    None, Host, Invite, JoinFriend, JoinIp, Leave, Back, Connect, SetPassword, ClearPassword, SubmitPassword,
+    PickPlayer, Kick, KickBan, ConfirmKick
 };
 
 struct Item {
     std::string label;
     Action action;
     float y0 = 0, y1 = 0, x0 = 0, x1 = 0;  // hit box from the last draw
+    int player = -1;  // PickPlayer: the guest's player id (drawn as its row in the player list, not as an item)
 };
 
 struct UiState {
@@ -58,6 +62,9 @@ struct UiState {
     std::string ipText;
     std::string pwText;         // Password panel (shown masked)
     bool pwForHost = false;     // Password panel: true = set the host's password, false = retry the refused join
+    int targetId = -1;          // PlayerMenu / ConfirmKick: the guest picked in the player list
+    std::string targetName;
+    bool targetBan = false;     // ConfirmKick: kick and ban
     float caret = 0;
     uint16_t padPrev = 0;
     float padRepeat = 0;
@@ -123,9 +130,31 @@ void PasswordItems() {
     if (u.info.passwordSet) u.items.push_back({"CLEAR PASSWORD", Action::ClearPassword});
 }
 
+int FirstMenuItem() {  // first item that is not a player row
+    const UiState& u = U();
+    for (size_t i = 0; i < u.items.size(); ++i)
+        if (u.items[i].player < 0) return static_cast<int>(i);
+    return 0;
+}
+
 void BuildPauseItems() {
     UiState& u = U();
+    // keep the selection on the same entry while players come and go (rebuilt every frame while open)
+    Action selAction = Action::None;
+    int selPlayer = -1;
+    if (u.selected >= 0 && u.selected < static_cast<int>(u.items.size())) {
+        selAction = u.items[static_cast<size_t>(u.selected)].action;
+        selPlayer = u.items[static_cast<size_t>(u.selected)].player;
+    }
     u.items.clear();
+    // Hosting: each guest's row in the player list can be selected (Enter: kick / kick and ban).
+    if (u.info.phase == Coop::Phase::Hosting)
+        for (const auto& p : u.info.players)
+            if (!p.host) {
+                Item it{p.name, Action::PickPlayer};
+                it.player = p.id;
+                u.items.push_back(it);
+            }
     switch (u.info.phase) {
     case Coop::Phase::Idle:
         u.items.push_back({"HOST CO-OP GAME", Action::Host});
@@ -145,6 +174,12 @@ void BuildPauseItems() {
         break;
     }
     u.items.push_back({"BACK", Action::Back});
+    for (size_t i = 0; i < u.items.size(); ++i)
+        if (selAction != Action::None && u.items[i].action == selAction && u.items[i].player == selPlayer) {
+            u.selected = static_cast<int>(i);
+            return;
+        }
+    if (selAction == Action::PickPlayer) u.selected = FirstMenuItem();  // that player left
     u.selected = std::clamp(u.selected, 0, static_cast<int>(u.items.size()) - 1);
 }
 
@@ -154,7 +189,14 @@ void Open(Panel p, bool pwForHost = false) {
     u.selected = 0;
     u.mouseX = u.mouseY = -1;
     u.padPrev = ui_input::PadButtons();  // a held A (that opened us) is not a new press
-    if (p == Panel::PauseCoop) BuildPauseItems();
+    if (p == Panel::PauseCoop) {
+        u.items.clear();
+        BuildPauseItems();
+        u.selected = FirstMenuItem();  // start on the menu, not on a player row
+    }
+    if (p == Panel::PlayerMenu)
+        u.items = {{"KICK", Action::Kick}, {"KICK AND BAN", Action::KickBan}, {"CANCEL", Action::Back}};
+    if (p == Panel::ConfirmKick) u.items = {{"YES", Action::ConfirmKick}, {"NO", Action::Back}};
     if (p == Panel::JoinIp) {
         u.ipText = u.info.lastAddress;
         u.items = {{"CONNECT", Action::Connect}, {"CANCEL", Action::Back}};
@@ -165,8 +207,11 @@ void Open(Panel p, bool pwForHost = false) {
         u.items = {{pwForHost ? "SET PASSWORD" : "CONNECT", Action::SubmitPassword}, {"CANCEL", Action::Back}};
     }
     ui_input::SetCapture(true);
-    MC_LOG_INFO("ui: %s panel opened",
-                p == Panel::PauseCoop ? "co-op" : p == Panel::JoinIp ? "join-by-ip" : "password");
+    MC_LOG_INFO("ui: %s panel opened", p == Panel::PauseCoop    ? "co-op"
+                                       : p == Panel::JoinIp     ? "join-by-ip"
+                                       : p == Panel::Password   ? "password"
+                                       : p == Panel::PlayerMenu ? "player"
+                                                                : "confirm-kick");
 }
 
 void Close() {
@@ -213,6 +258,27 @@ void Run(Action a) {
         }
         Close();
         Coop::JoinAddress(addr);
+        break;
+    }
+    case Action::PickPlayer: {
+        const Item& it = u.items[static_cast<size_t>(u.selected)];
+        u.targetId = it.player;
+        u.targetName = it.label;
+        Open(Panel::PlayerMenu);
+        break;
+    }
+    case Action::Kick:
+    case Action::KickBan:
+        u.targetBan = a == Action::KickBan;
+        Open(Panel::ConfirmKick);
+        break;
+    case Action::ConfirmKick: {
+        const int id = u.targetId;
+        const bool ban = u.targetBan;
+        const std::string name = u.targetName;
+        Close();
+        if (id < 0 || !Coop::Kick(static_cast<uint8_t>(id), ban))
+            AddToast("CO-OP", name + " is no longer in the game", true);
         break;
     }
     case Action::None: break;
@@ -405,6 +471,7 @@ void DrawItems(render::DrawList& d, float x, float& y, float w, float s) {
     const float px = 30 * s, rowH = 46 * s;
     for (size_t i = 0; i < u.items.size(); ++i) {
         Item& it = u.items[i];
+        if (it.player >= 0) continue;  // player rows are drawn in the player list (DrawPausePanel)
         const bool sel = static_cast<int>(i) == u.selected;
         it.x0 = x;
         it.x1 = x + w;
@@ -440,7 +507,9 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
     const float top = y;
     // measure: title, status, players, items, hints
     const float rows = static_cast<float>(info.players.size());
-    const float h = 70 * s + 40 * s + (rows > 0 ? rows * 36 * s + 30 * s : 0) + static_cast<float>(u.items.size()) * 46 * s +
+    const auto menuItems =
+        std::count_if(u.items.begin(), u.items.end(), [](const Item& it) { return it.player < 0; });
+    const float h = 70 * s + 40 * s + (rows > 0 ? rows * 36 * s + 30 * s : 0) + static_cast<float>(menuItems) * 46 * s +
                     90 * s;
     d.RectH(x, top, w, h, kPanelBg, 0xD8121110);
     d.Rect(x, top, w, 2 * s, kGoldDim);
@@ -471,8 +540,23 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
     if (!info.players.empty()) {
         d.Rect(x + pad, y - 8 * s, w - pad * 2, 1 * s, 0x60D1AC62);
         for (const auto& p : info.players) {
+            // Hosting: a guest's row is selectable (an item with its player id); hit box and highlight like an item.
+            bool sel = false;
+            for (size_t i = 0; i < u.items.size(); ++i) {
+                Item& it = u.items[i];
+                if (it.player != p.id || p.host) continue;
+                it.x0 = x + pad - 16 * s;
+                it.x1 = x + w - pad;
+                it.y0 = y - 5 * s;
+                it.y1 = y + 31 * s;
+                sel = static_cast<int>(i) == u.selected;
+                if (sel) {
+                    d.RectH(it.x0, it.y0, it.x1 - it.x0, it.y1 - it.y0, 0x66B08A45, 0x00B08A45);
+                    d.Rect(it.x0, it.y0, 2 * s, it.y1 - it.y0, kGold);
+                }
+            }
             std::string name = p.name + (p.host ? "  (HOST)" : "") + (p.you ? "  (YOU)" : "");
-            d.Text(x + pad + 4 * s, y, Upper(name), 25 * s, p.you ? kText : kTextDim);
+            d.Text(x + pad + 4 * s, y, Upper(name), 25 * s, sel ? 0xFFFFFFFF : p.you ? kText : kTextDim);
             if (p.pingMs >= 0) {
                 const std::string ping = std::to_string(p.pingMs) + " MS";
                 const uint32_t col = p.pingMs < 80 ? 0xFF8CCB7E : p.pingMs < 160 ? 0xFFE0C060 : kRed;
@@ -521,6 +605,45 @@ void DrawTextBox(render::DrawList& d, float W, float H, float s, float dt, const
     float hx = x + pad;
     hx += Hint(d, hx, y, "Enter", submit, 22 * s);
     Hint(d, hx, y, "Esc", "Cancel", 22 * s);
+}
+
+// PlayerMenu / ConfirmKick: title, one line of text, the items and the key hints (the text box panel's frame).
+void DrawChoice(render::DrawList& d, float W, float H, float s, const std::string& title, const std::string& text,
+                const std::string& yes, const std::string& no) {
+    UiState& u = U();
+    d.Rect(0, 0, W, H, kShade);
+    const float w = 620 * s, x = (W - w) * 0.5f, pad = 36 * s;
+    const auto lines = Wrap(text, 25 * s, w - pad * 2);
+    const float h = 22 * s + 66 * s + static_cast<float>(lines.size()) * 32 * s + 16 * s +
+                    static_cast<float>(u.items.size()) * 46 * s + 20 * s + 50 * s;
+    const float top = H * 0.26f;
+    d.RectH(x, top, w, h, kPanelBg, 0xD8121110);
+    d.Rect(x, top, w, 2 * s, kGoldDim);
+    float y = top + 22 * s;
+    d.Text(x + pad, y, title, 50 * s, kGold);
+    y += 66 * s;
+    for (const auto& l : lines) {
+        d.Text(x + pad, y, l, 25 * s, kText);
+        y += 32 * s;
+    }
+    y += 16 * s;
+    DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
+    y += 20 * s;
+    float hx = x + pad;
+    hx += Hint(d, hx, y, "Enter", yes, 22 * s);
+    Hint(d, hx, y, "Esc", no, 22 * s);
+}
+
+void DrawPlayerMenu(render::DrawList& d, float W, float H, float s) {
+    DrawChoice(d, W, H, s, Upper(U().targetName), "Remove this player from your co-op game?", "Select", "Cancel");
+}
+
+void DrawConfirmKick(render::DrawList& d, float W, float H, float s) {
+    const UiState& u = U();
+    DrawChoice(d, W, H, s, u.targetBan ? "KICK AND BAN" : "KICK",
+               std::string(u.targetBan ? "Kick and ban " : "Kick ") + u.targetName + "? Enter = yes, Esc = no" +
+                   (u.targetBan ? " (banned until you stop hosting)" : ""),
+               "Yes", "No");
 }
 
 void DrawJoinIp(render::DrawList& d, float W, float H, float s, float dt) {
@@ -593,6 +716,8 @@ void CoopUi::Tick(float dt) {
     if (u.panel == Panel::PauseCoop) DrawPausePanel(u.list, W, H, s);
     if (u.panel == Panel::JoinIp) DrawJoinIp(u.list, W, H, s, dt);
     if (u.panel == Panel::Password) DrawPassword(u.list, W, H, s, dt);
+    if (u.panel == Panel::PlayerMenu) DrawPlayerMenu(u.list, W, H, s);
+    if (u.panel == Panel::ConfirmKick) DrawConfirmKick(u.list, W, H, s);
     DrawToasts(u.list, W, s);
 }
 
