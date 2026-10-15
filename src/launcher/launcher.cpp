@@ -5,6 +5,7 @@
 //                   [--<key> [value]] [--game <exe path>] [+connect_lobby <id>]
 //                   [--skip-version-check] [--check-only]
 //        <launcher> --install | --uninstall [--game <exe or folder>] [--yes]
+// Parsing is in args.h; keys that need a value (args.h kValueKeys) refuse to start without one.
 // Every --<key> [value] (except --game and the launcher-only flags) is passed to the dll as environment variable
 // <envPrefix><KEY>=<value> ("1" for a bare flag); core::Config gives these precedence over the ini.
 // Before starting the game the CRC32 of its exe is checked against GameInfo::builds (cached in version-cache.txt);
@@ -13,6 +14,7 @@
 // --yes skips their confirmation dialog and prints the result instead (scripts, tests).
 #include "mc/core_version.h"
 #include "core/names.h"
+#include "launcher/args.h"
 #include "launcher/install.h"
 #include "mc/game_info.h"
 #include "proxy/proxy_shared.h"
@@ -466,58 +468,22 @@ int Run() {
     const std::wstring modName = ModName(), launcherName = Gi().launcherName, dllName = Gi().dllName;
     const std::wstring gameName = core::AsciiW(Gi().gameName), envPrefix = core::AsciiW(Gi().envPrefix);
 
-    // ---- arguments ----
+    // ---- arguments (args.h) ----
     // --key [value] -> <envPrefix>KEY env var for the dll; +word args (e.g. "+connect_lobby <id>", which Steam
-    // passes for "Join Game") go to the game's command line unchanged.
-    std::vector<std::pair<std::wstring, std::wstring>> passEnv;
-    std::wstring gameOverride, logTag, gameArgs;
-    bool checkOnly = false, skipVersionCheck = false, install = false, uninstall = false, assumeYes = false;
+    // passes for "Join Game") go to the game's command line unchanged. Keys that need a value refuse to start without.
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    for (int i = 1; i < argc; ++i) {
-        std::wstring a = argv[i];
-        if (a.size() > 1 && a[0] == L'+') {
-            gameArgs += L" " + QuoteArg(a);
-            if (i + 1 < argc && argv[i + 1][0] != L'-' && argv[i + 1][0] != L'+')
-                gameArgs += L" " + QuoteArg(argv[++i]);
-            continue;
-        }
-        if (a.rfind(L"--", 0) != 0 || a.size() < 3) {
-            return Fail(L"Unexpected argument: " + a +
-                        L"\n\nUsage: " + launcherName + L" [--host] [--join <ip>] [--join-lobby <id>] "
-                        L"[--name <name>] [--<key> [value]] [--game <exe>]");
-        }
-        std::wstring key = a.substr(2);
-        // launcher-only flags (not passed to the dll)
-        if (Lower(key) == L"check-only") {
-            checkOnly = true;
-            continue;
-        }
-        if (Lower(key) == L"skip-version-check") {
-            skipVersionCheck = true;
-            continue;
-        }
-        if (Lower(key) == L"install" || Lower(key) == L"uninstall") {
-            (Lower(key) == L"install" ? install : uninstall) = true;
-            continue;
-        }
-        if (Lower(key) == L"yes") {
-            assumeYes = true;
-            continue;
-        }
-        std::wstring value = L"1";
-        if (i + 1 < argc && std::wstring(argv[i + 1]).rfind(L"--", 0) != 0) value = argv[++i];
-        if (Lower(key) == L"game") {
-            gameOverride = value;
-            continue;
-        }
-        if (Lower(key) == L"log") logTag = value;
-        std::wstring envName = envPrefix;
-        for (wchar_t c : key) envName += (c == L'-' || c == L'.') ? L'_' : static_cast<wchar_t>(towupper(c));
-        passEnv.emplace_back(envName, value);
-    }
+    LaunchArgs args = ParseLaunchArgs(argv ? argc : 0, argv, envPrefix, launcherName, QuoteArg);
     if (argv) LocalFree(argv);
-    if (install && uninstall) return Fail(L"--install and --uninstall cannot be combined.");
+    if (!args.error.empty()) {
+        _console = args.NonInteractive();
+        return Fail(args.error);
+    }
+    std::vector<std::pair<std::wstring, std::wstring>>& passEnv = args.passEnv;
+    const std::wstring &gameOverride = args.gameOverride, &logTag = args.logTag, &gameArgs = args.gameArgs;
+    const bool checkOnly = args.checkOnly, install = args.install, uninstall = args.uninstall,
+               assumeYes = args.assumeYes;
+    bool skipVersionCheck = args.skipVersionCheck;  // the ini can turn it on too
     _console = checkOnly || ((install || uninstall) && assumeYes);
 
     // ---- log: one per launch when several games run (launcher-<tag>.log / launcher-<pid>.log) ----
