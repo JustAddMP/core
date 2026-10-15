@@ -33,4 +33,16 @@ uint16_t PadButtons();
 // First gamepad's left trigger (0..255), 0 if none. Render thread.
 uint8_t PadLeftTrigger();
 
+// Test pad, for automated tests (synthetic mouse clicks never reach some games; a pad does): a virtual gamepad on
+// XInput user 0 that the game and our panels read like a real one. Off by default; the dll turns it on with
+// `test_pad = 1` (ini) / `--test_pad 1` (launcher). SetTestPad holds the given state for holdMs milliseconds
+// (0 = until the next call), then releases everything; false if the test pad is off. Any thread.
+struct TestPadState {
+    uint16_t buttons = 0;  // XINPUT_GAMEPAD_* bits
+    uint8_t leftTrigger = 0, rightTrigger = 0;
+    int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+};
+void EnableTestPad(bool on);
+bool SetTestPad(const TestPadState& state, uint32_t holdMs);
+
 }  // namespace mc::ui_input

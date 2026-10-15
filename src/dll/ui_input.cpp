@@ -30,12 +30,21 @@ using GetDeviceStateFn = HRESULT(STDMETHODCALLTYPE*)(void* self, DWORD size, voi
 using GetDeviceDataFn = HRESULT(STDMETHODCALLTYPE*)(void* self, DWORD objSize, DIDEVICEOBJECTDATA* data,
                                                     DWORD* inOut, DWORD flags);
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD user, XINPUT_STATE* state);
+using XInputGetCapsFn = DWORD(WINAPI*)(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps);
 
 GetDeviceStateFn _origStateA = nullptr, _origStateW = nullptr;
 void* _targetStateW = nullptr;  // hooked addresses of the W flavour (the A vtable may point to the same code)
 void* _targetDataW = nullptr;
 GetDeviceDataFn _origDataA = nullptr, _origDataW = nullptr;
 XInputGetStateFn _origXInput = nullptr;
+XInputGetCapsFn _origXInputCaps = nullptr;
+
+// Test pad (SetTestPad): a virtual gamepad on XInput user 0 for automated tests. Off unless enabled.
+std::atomic<bool> _testPadEnabled{false};
+std::mutex _testPadMutex;
+XINPUT_GAMEPAD _testPad{};
+ULONGLONG _testPadUntil = 0;  // GetTickCount64 deadline of the injected state (0 = released)
+DWORD _testPadPacket = 0;
 
 std::atomic<bool> _capture{false};
 std::atomic<bool> _guard{false};  // capture ended, keys still down
@@ -136,8 +145,48 @@ HRESULT STDMETHODCALLTYPE DataDetourW(void* self, DWORD objSize, DIDEVICEOBJECTD
     return DataDetour(_origDataW, self, objSize, data, inOut, flags);
 }
 
+// The real pad state of user 0, or the test pad while it is enabled (its buttons on top of a real pad).
+DWORD ReadPad(DWORD user, XINPUT_STATE* state) {
+    DWORD r = _origXInput(user, state);
+    if (user != 0 || !_testPadEnabled.load() || !state) return r;
+    if (r != ERROR_SUCCESS) std::memset(state, 0, sizeof(*state));
+    std::lock_guard lock(_testPadMutex);
+    if (_testPadUntil && GetTickCount64() >= _testPadUntil) {
+        _testPad = {};
+        _testPadUntil = 0;
+        ++_testPadPacket;
+    }
+    XINPUT_GAMEPAD& g = state->Gamepad;
+    g.wButtons |= _testPad.wButtons;
+    if (_testPad.bLeftTrigger) g.bLeftTrigger = _testPad.bLeftTrigger;
+    if (_testPad.bRightTrigger) g.bRightTrigger = _testPad.bRightTrigger;
+    if (_testPad.sThumbLX || _testPad.sThumbLY) {
+        g.sThumbLX = _testPad.sThumbLX;
+        g.sThumbLY = _testPad.sThumbLY;
+    }
+    if (_testPad.sThumbRX || _testPad.sThumbRY) {
+        g.sThumbRX = _testPad.sThumbRX;
+        g.sThumbRY = _testPad.sThumbRY;
+    }
+    state->dwPacketNumber += _testPadPacket;
+    return ERROR_SUCCESS;
+}
+
+DWORD WINAPI XInputCapsDetour(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps) {
+    const DWORD r = _origXInputCaps(user, flags, caps);
+    if (r == ERROR_SUCCESS || user != 0 || !_testPadEnabled.load() || !caps) return r;
+    std::memset(caps, 0, sizeof(*caps));  // the test pad looks like a wired Xbox controller
+    caps->Type = XINPUT_DEVTYPE_GAMEPAD;
+    caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->Gamepad.wButtons = 0xF3FF;
+    caps->Gamepad.bLeftTrigger = caps->Gamepad.bRightTrigger = 0xFF;
+    caps->Gamepad.sThumbLX = caps->Gamepad.sThumbLY = caps->Gamepad.sThumbRX = caps->Gamepad.sThumbRY =
+        static_cast<SHORT>(0xFFC0);
+    return ERROR_SUCCESS;
+}
+
 DWORD WINAPI XInputDetour(DWORD user, XINPUT_STATE* state) {
-    const DWORD r = _origXInput(user, state);
+    const DWORD r = ReadPad(user, state);
     if (r == ERROR_SUCCESS && state) {
         if (user == 0) _pad = state->Gamepad.wButtons;
         if (BlockNow()) std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
@@ -210,6 +259,10 @@ bool Install() {
         MC_LOG_WARN("ui_input: XInput hook failed; no gamepad in co-op panels");
         ok = false;
     }
+    void* xcaps = xinput ? reinterpret_cast<void*>(GetProcAddress(xinput, "XInputGetCapabilities")) : nullptr;
+    if (xcaps)
+        core::hook::Install("XInputGetCapabilities", xcaps, reinterpret_cast<void*>(&XInputCapsDetour),
+                            reinterpret_cast<void**>(&_origXInputCaps));
     MC_LOG_INFO("ui_input: installed (DirectInput %s, XInput %s)", _origStateW ? "ok" : "off",
                 _origXInput ? "ok" : "off");
     return ok;
@@ -291,20 +344,39 @@ bool PopEvent(Event* out) {
 uint8_t PadLeftTrigger() {
     if (!_origXInput) return 0;
     XINPUT_STATE st{};
-    if (_origXInput(0, &st) != ERROR_SUCCESS) return 0;
+    if (ReadPad(0, &st) != ERROR_SUCCESS) return 0;
     return st.Gamepad.bLeftTrigger;
 }
 
 uint16_t PadButtons() {
     if (!_origXInput) return 0;
     XINPUT_STATE st{};
-    if (_origXInput(0, &st) != ERROR_SUCCESS) return 0;
+    if (ReadPad(0, &st) != ERROR_SUCCESS) return 0;
     _pad = st.Gamepad.wButtons;
     uint16_t b = st.Gamepad.wButtons;
     constexpr SHORT kStick = 16000;  // left stick up/down counts as the d-pad
     if (st.Gamepad.sThumbLY > kStick) b |= XINPUT_GAMEPAD_DPAD_UP;
     if (st.Gamepad.sThumbLY < -kStick) b |= XINPUT_GAMEPAD_DPAD_DOWN;
     return b;
+}
+
+void EnableTestPad(bool on) {
+    if (_testPadEnabled.exchange(on) != on) MC_LOG_INFO("ui_input: test pad %s", on ? "enabled" : "disabled");
+}
+
+bool SetTestPad(const TestPadState& st, uint32_t holdMs) {
+    if (!_testPadEnabled.load() || !_origXInput) return false;
+    std::lock_guard lock(_testPadMutex);
+    _testPad.wButtons = st.buttons;
+    _testPad.bLeftTrigger = st.leftTrigger;
+    _testPad.bRightTrigger = st.rightTrigger;
+    _testPad.sThumbLX = st.lx;
+    _testPad.sThumbLY = st.ly;
+    _testPad.sThumbRX = st.rx;
+    _testPad.sThumbRY = st.ry;
+    _testPadUntil = holdMs ? GetTickCount64() + holdMs : 0;
+    ++_testPadPacket;
+    return true;
 }
 
 }  // namespace mc::ui_input
