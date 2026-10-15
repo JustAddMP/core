@@ -85,6 +85,7 @@ struct UiState {
     float mouseX = -1, mouseY = -1;
     bool compatChecked = false;
     uint32_t starts = 0;  // Coop::Info::starts last frame
+    bool wasInSession = false;
 };
 
 UiState& U() {
@@ -1053,6 +1054,10 @@ void CoopUi::Tick(float dt) {
         ShowCompatBanner();
     }
     u.info = Coop::GetInfo();
+    // The session ended (left, kicked, the host left): a lobby of that session has nothing left to show.
+    const bool inSession = u.info.phase != Coop::Phase::Idle;
+    if (u.wasInSession && !inSession && u.panel == Panel::Lobby) Close();
+    u.wasInSession = inSession;
     if (u.info.starts != u.starts) {  // the host started a game: everybody's lobby closes, the game loads
         u.starts = u.info.starts;
         if (u.panel == Panel::Lobby) Close();
