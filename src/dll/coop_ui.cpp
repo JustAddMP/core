@@ -378,14 +378,22 @@ void HandleInput(float dt) {
                 u.caret = 0;
             }
             break;
-        case ui_input::Event::MouseMove:
+        case ui_input::Event::MouseMove: {
+            // Only a real move selects the row under the cursor. Games that keep the cursor centred send a
+            // WM_MOUSEMOVE to the same spot every frame; acting on those would pin the selection to whatever row
+            // lies under the window centre and undo every keyboard/pad step. The first event after a panel opens
+            // only records where the cursor is.
+            const bool first = u.mouseX < 0;
+            const bool moved = std::fabs(e.x - u.mouseX) > 0.5f || std::fabs(e.y - u.mouseY) > 0.5f;
             u.mouseX = e.x;
             u.mouseY = e.y;
+            if (first || !moved) break;
             for (size_t i = 0; i < u.items.size(); ++i) {
                 const Item& it = u.items[i];
                 if (e.x >= it.x0 && e.x <= it.x1 && e.y >= it.y0 && e.y <= it.y1) u.selected = static_cast<int>(i);
             }
             break;
+        }
         case ui_input::Event::MouseDown:
             for (size_t i = 0; i < u.items.size(); ++i) {
                 const Item& it = u.items[i];
