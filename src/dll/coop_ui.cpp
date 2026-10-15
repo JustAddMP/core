@@ -44,7 +44,7 @@ struct Toast {
 enum class Panel { None, PauseCoop, JoinIp, Password, PlayerMenu, ConfirmKick };
 enum class Action {
     None, Host, Invite, JoinFriend, JoinIp, Leave, Back, Connect, SetPassword, ClearPassword, SubmitPassword,
-    PickPlayer, Kick, KickBan, ConfirmKick
+    PickPlayer, Kick, KickBan, ConfirmKick, Option
 };
 
 struct Item {
@@ -52,6 +52,8 @@ struct Item {
     Action action;
     float y0 = 0, y1 = 0, x0 = 0, x1 = 0;  // hit box from the last draw
     int player = -1;  // PickPlayer: the guest's player id (drawn as its row in the player list, not as an item)
+    int option = -1;  // Option: index into the game's PanelOptions list
+    std::string value;  // Option: its current value
 };
 
 struct UiState {
@@ -141,10 +143,11 @@ void BuildPauseItems() {
     UiState& u = U();
     // keep the selection on the same entry while players come and go (rebuilt every frame while open)
     Action selAction = Action::None;
-    int selPlayer = -1;
+    int selPlayer = -1, selOption = -1;
     if (u.selected >= 0 && u.selected < static_cast<int>(u.items.size())) {
         selAction = u.items[static_cast<size_t>(u.selected)].action;
         selPlayer = u.items[static_cast<size_t>(u.selected)].player;
+        selOption = u.items[static_cast<size_t>(u.selected)].option;
     }
     u.items.clear();
     // Hosting: each guest's row in the player list can be selected (Enter: kick / kick and ban).
@@ -155,6 +158,15 @@ void BuildPauseItems() {
                 it.player = p.id;
                 u.items.push_back(it);
             }
+    // the game's settings (e.g. CHARACTER), in every state
+    std::vector<PanelOption> options;
+    GetGameModule().PanelOptions(options);
+    for (size_t i = 0; i < options.size(); ++i) {
+        Item it{options[i].label, Action::Option};
+        it.option = static_cast<int>(i);
+        it.value = options[i].value;
+        u.items.push_back(it);
+    }
     switch (u.info.phase) {
     case Coop::Phase::Idle:
         u.items.push_back({"HOST CO-OP GAME", Action::Host});
@@ -175,7 +187,8 @@ void BuildPauseItems() {
     }
     u.items.push_back({"BACK", Action::Back});
     for (size_t i = 0; i < u.items.size(); ++i)
-        if (selAction != Action::None && u.items[i].action == selAction && u.items[i].player == selPlayer) {
+        if (selAction != Action::None && u.items[i].action == selAction && u.items[i].player == selPlayer &&
+            u.items[i].option == selOption) {
             u.selected = static_cast<int>(i);
             return;
         }
@@ -281,8 +294,23 @@ void Run(Action a) {
             AddToast("CO-OP", name + " is no longer in the game", true);
         break;
     }
+    case Action::Option: {
+        const Item& it = u.items[static_cast<size_t>(u.selected)];
+        if (it.option >= 0) GetGameModule().PanelOptionStep(static_cast<size_t>(it.option), +1);
+        break;
+    }
     case Action::None: break;
     }
+}
+
+// Left/Right on a game option row: step it. False if the selected row is not an option.
+bool StepOption(int delta) {
+    UiState& u = U();
+    if (u.panel != Panel::PauseCoop || u.selected < 0 || u.selected >= static_cast<int>(u.items.size())) return false;
+    const Item& it = u.items[static_cast<size_t>(u.selected)];
+    if (it.option < 0) return false;
+    GetGameModule().PanelOptionStep(static_cast<size_t>(it.option), delta);
+    return true;
 }
 
 void Move(int d) {
@@ -316,6 +344,8 @@ void HandleInput(float dt) {
             case VK_UP: Move(-1); break;
             case VK_DOWN:
             case VK_TAB: Move(1); break;
+            case VK_LEFT: StepOption(-1); break;
+            case VK_RIGHT: StepOption(+1); break;
             case VK_RETURN:
             case VK_SPACE:
                 if (TextPanel(u.panel) && e.code == VK_SPACE) break;
@@ -385,6 +415,8 @@ void HandleInput(float dt) {
         Run(Action::Back);
         return;
     }
+    if (pressed & XINPUT_GAMEPAD_DPAD_LEFT) StepOption(-1);
+    if (pressed & XINPUT_GAMEPAD_DPAD_RIGHT) StepOption(+1);
     const bool up = (pad & XINPUT_GAMEPAD_DPAD_UP) != 0, down = (pad & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
     if (pressed & XINPUT_GAMEPAD_DPAD_UP) {
         Move(-1);
@@ -482,6 +514,16 @@ void DrawItems(render::DrawList& d, float x, float& y, float w, float s) {
             d.Rect(x, y + 3 * s, 2 * s, rowH - 6 * s, kGold);
         }
         d.Text(x + 16 * s, y + (rowH - px) * 0.5f, it.label, px, sel ? 0xFFFFFFFF : kTextDim);
+        if (it.option >= 0) {  // a game option: "<  VALUE  >" on the right
+            const float vpx = 26 * s, ty = y + (rowH - vpx) * 0.5f;
+            const std::string v = Upper(it.value);
+            const float vw = render::DrawList::TextWidth(v, vpx), aw = render::DrawList::TextWidth(">", vpx);
+            const float right = x + w - 12 * s;
+            const uint32_t arrow = sel ? kGold : kGoldDim;
+            d.Text(right - aw, ty, ">", vpx, arrow);
+            d.Text(right - aw - 14 * s - vw, ty, v, vpx, sel ? 0xFFFFFFFF : kText);
+            d.Text(right - aw - 28 * s - vw - aw, ty, "<", vpx, arrow);
+        }
         y += rowH;
     }
 }
@@ -575,7 +617,10 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
     float hx = x + pad;
-    hx += Hint(d, hx, y, "Enter", "Select", 22 * s);
+    const bool onOption = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
+                          u.items[static_cast<size_t>(u.selected)].option >= 0;
+    if (onOption) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
+    hx += Hint(d, hx, y, "Enter", onOption ? "Next" : "Select", 22 * s);
     Hint(d, hx, y, "Esc", "Back", 22 * s);
 }
 

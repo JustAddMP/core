@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <vector>
 
 namespace mc::core {
 namespace {
@@ -29,6 +30,7 @@ Config& Config::Get() {
 }
 
 bool Config::Load(const std::wstring& path) {
+    std::lock_guard lock(_mutex);
     _path = path;
     _values.clear();
     std::ifstream in(path);
@@ -51,6 +53,14 @@ bool Config::Load(const std::wstring& path) {
 }
 
 bool Config::Lookup(const std::string& key, std::string& out) const {
+    {
+        std::lock_guard lock(_mutex);
+        auto it = _set.find(Lower(key));
+        if (it != _set.end()) {
+            out = it->second;
+            return true;
+        }
+    }
     std::string envName = _envPrefix;
     for (char c : key) {
         envName += (c == '.' || c == '-') ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -71,9 +81,56 @@ bool Config::Lookup(const std::string& key, std::string& out) const {
             }
         }
     }
+    std::lock_guard lock(_mutex);
     auto it = _values.find(Lower(key));
     if (it == _values.end()) return false;
     out = it->second;
+    return true;
+}
+
+bool Config::Set(const std::string& key, const std::string& value) {
+    const std::string lkey = Lower(Trim(key));
+    if (lkey.empty() || lkey.find_first_of("=\r\n") != std::string::npos ||
+        value.find_first_of("\r\n") != std::string::npos)
+        return false;
+    std::lock_guard lock(_mutex);
+    _set[lkey] = value;
+    if (_path.empty()) return true;
+    // Rewrite the file: replace the first line for this key, keep everything else as it is.
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(_path, std::ios::binary);
+        std::string line;
+        while (in && std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
+    }
+    const std::string entry = Trim(key) + " = " + value;
+    bool replaced = false;
+    for (std::string& line : lines) {
+        std::string t = Trim(line);
+        if (t.size() >= 3 && t.compare(0, 3, "\xEF\xBB\xBF") == 0) t = Trim(t.substr(3));  // UTF-8 BOM
+        if (t.empty() || t[0] == '#' || t[0] == ';' || t[0] == '[') continue;
+        const size_t eq = t.find('=');
+        if (eq == std::string::npos || Lower(Trim(t.substr(0, eq))) != lkey) continue;
+        line = entry;
+        replaced = true;
+        break;
+    }
+    if (!replaced) lines.push_back(entry);
+    const std::wstring tmp = _path + L".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        for (const std::string& line : lines) out << line << "\r\n";
+        if (!out.flush()) return false;
+    }
+    if (!MoveFileExW(tmp.c_str(), _path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    _values[lkey] = value;
     return true;
 }
 

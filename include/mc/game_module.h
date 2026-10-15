@@ -36,6 +36,14 @@ struct MenuState {
     bool password = false;  // a host password is set
 };
 
+// A game setting shown as a row in the pause menu's CO-OP panel (e.g. the player's character): the label on the
+// left, the current value on the right between arrows. Left/Right (pad d-pad) step through the values; Enter, pad A
+// and a click step forward.
+struct PanelOption {
+    std::string label;  // "CHARACTER"
+    std::string value;  // "PAULIE"
+};
+
 class GameModule {
 public:
     virtual ~GameModule() = default;
@@ -60,6 +68,10 @@ public:
     virtual void AppendStatus(std::vector<render::OverlayLine>&) {}  // lines for the debug status text
     virtual void SetMenuState(const MenuState&) {}                // published every frame
     virtual bool PopMenuCommand(MenuCommand*) { return false; }   // drained every frame
+    // Rows for the CO-OP panel, asked every frame while it is open (in every session state, also without one).
+    virtual void PanelOptions(std::vector<PanelOption>&) {}
+    // The player stepped option `index` (from the last PanelOptions list) by delta (-1 or +1).
+    virtual void PanelOptionStep(size_t /*index*/, int /*delta*/) {}
 };
 
 GameModule& GetGameModule();  // defined by the game repo (dll only)
