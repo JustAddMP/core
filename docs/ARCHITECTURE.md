@@ -36,14 +36,16 @@ src/
   net/                    transport.h (interface), udp_transport (own reliability), steam_transport (ISteamNetworking
                           P2P, flat API), multi_transport, steam_flat (bindings), steam_lobby, session (host-
                           authoritative star, relay, password, kick/ban), wire (byte writer/reader), auth (BCrypt HMAC),
-                          interest (interest management, docs/interest.md)
+                          interest (interest management, docs/interest.md), lobby (pre-game lobby: ready, mode,
+                          start, in-game state; docs/protocol.md "Lobby")
   render/                 present_hook (IDXGISwapChain::Present/ResizeBuffers -> per-frame tick on the render thread),
                           overlay + overlay.hlsl (D3D11 text/rect renderer), ui_font (GDI glyph atlas), font8x16.h
   swf/                    swf_patch: SWF/GFX + AVM2 (ABC) patcher (constant pool append, method prologues, assembler)
                           for games whose menus are Scaleform movies
-  dll/                    dllmain (init thread), mod (per-frame tick), coop (sessions: host / join / Steam lobby /
-                          invites / password / kick), coop_ui (pause co-op panel with kick / kick and ban, join-by-IP and password boxes,
-                          banners),
+  dll/                    dllmain (init thread), mod (per-frame tick; process-exit hooks: leave the session cleanly),
+                          coop (sessions: host / join / Steam lobby / invites / password / kick / the pre-game lobby),
+                          coop_ui (pause co-op panel with kick / kick and ban, the LOBBY panel, CO-OP SETTINGS, join-by-IP,
+                          password and name boxes, banners),
                           ui_input (panel input; blocks the game's DirectInput/XInput/window input while a panel is
                           open; test pad: a virtual XInput gamepad for automated tests, test_pad = 1), window_place
                           (--window left|right)
@@ -52,7 +54,7 @@ src/
                           value, e.g. --password, refuse to start without one), install (--install / --uninstall)
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
-tests/                    net_loopback, net_password, net_kick, net_interest, net_fuzz, proxy_test, pending_join,
+tests/                    net_loopback, net_password, net_kick, net_lobby, net_interest, net_fuzz, proxy_test, pending_join,
                           crash_dump, launcher_args, steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py
@@ -84,7 +86,12 @@ Namespaces: `mc` (GameInfo, GameModule, Mod, Coop, CoopUi), `mc::core`, `mc::net
 | `PlayerHealth(id)` | render | players panel (optional; -1 = no column) |
 | `AppendStatus(lines)` | render | debug status text, F7 (optional) |
 | `SetMenuState(state)` / `PopMenuCommand(&cmd)` | render | every frame: the game's native menu entries (optional) |
-| `PanelOptions(rows)` / `PanelOptionStep(index, delta)` | render | every frame while the CO-OP panel is open: game settings shown as "LABEL  < VALUE >" rows (e.g. the player's character); Left/Right, pad d-pad, Enter/A/click step them (optional) |
+| `PanelOptions(rows)` / `PanelOptionStep(index, delta)` | render | every frame while the CO-OP panel or the lobby is open: game settings shown as "LABEL  < VALUE >" rows (e.g. the player's character); Left/Right, pad d-pad, Enter/A/click step them (optional) |
+| `SettingsOptions(rows)` / `SettingsOptionStep(index, delta)` | render | the game's rows in CO-OP SETTINGS (core adds NAME and DEBUG OVERLAY), e.g. SHOW NAME TAGS (optional, 0.5) |
+| `LobbyModes(modes)` / `StartMode(mode)` | render | the modes the host can pick in the lobby (name, available, note); load one when the lobby starts or a late joiner follows the host (optional, 0.5) |
+| `InWorld()` / `CurrentMode()` / `LobbyCanOpen()` | render | the local player is in a loaded world, which mode he plays; whether the lobby may open by itself now (not over a title screen) (optional, 0.5) |
+| `PlayerCharacter(id)` | render | a player's character for the lobby's CHARACTER column (optional, 0.5) |
+| `DrawHud(list, w, h)` | render | every frame: game geometry drawn under core's panels and banners, e.g. name tags (optional, 0.5) |
 
 Features that cannot work on the running exe report to `core::compat::Failed(name, required)`; a required one
 disables co-op with a banner, an optional one only shows the banner. The game's own threads (e.g. a script-VM tick it
@@ -101,6 +108,12 @@ hooks itself) are the game layer's business: core only calls the points above.
   co-op UI and the overlay.
 - Hand-over between the render thread and any game thread the game layer uses is the game layer's job (one mutex per
   subsystem, held only for copies, is the pattern).
+- Process exit: `ExitProcess` / `TerminateProcess(self)` are hooked; the hook waits (at most 500 ms) for the current
+  frame's Tick to finish, leaves the session cleanly (the others are told at once, docs/protocol.md "Leaving cleanly"),
+  releases the overlay's D3D objects and stops further ticks.
+- Overlay: no backbuffer reference survives a frame (a view is made and released every frame), so the game's
+  ResizeBuffers / swapchain release never trips over us; a Present that reports device removed/reset drops every
+  overlay resource (rebuilt on the next frame with a device). Present and ResizeBuffers thread ids are logged.
 - Crash dumps: `<dll dir>\logs\crash-<time>.dmp`, one per process, only for an exception that ends the process
   (unhandled, or heap corruption / stack buffer overrun); handled first-chance exceptions never use it up. DllMain
   keeps 64 KB of stack back on every thread (>= 1 MB stacks) so an unhandled stack overflow still reaches the

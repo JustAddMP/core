@@ -3,6 +3,28 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.5.0 — 2026-10-15
+
+Pre-game lobby, co-op settings panel, HUD drawing for games, clean exit (new features, so a minor release). No
+breaking changes: game repos update without code changes; every new interface call is optional. The wire protocol
+changes (`kProtocolVersion` 7, the lobby messages), so players need the same build anyway.
+
+- Lobby (`net/lobby.h`, docs/protocol.md "Lobby"): guests ready up, the host picks a mode from the game's list and
+  starts it for everyone; a late joiner sees the game in progress and can follow it. The dll attaches it to every
+  session and writes `mc_state` / `mc_mode` into the Steam lobby data (`SteamLobby::SetData`). New test `net_lobby`.
+- Co-op UI: a LOBBY panel (players with character and READY / NOT READY / HOST, the game's character rows, READY or
+  MODE + START, JOIN GAME while the host plays, INVITE FRIENDS, SETTINGS, LEAVE); it opens by itself after joining a
+  host while not in the world (once `GameModule::LobbyCanOpen()`), closes on every screen when the game starts and
+  when the session ends. A CO-OP SETTINGS panel (NAME with a text box, DEBUG OVERLAY, the game's rows; saved with
+  `Config::Set`), also reachable from the pause CO-OP panel. New `MenuCommand::Lobby` / `Settings`.
+- GameModule (all optional): `SettingsOptions` / `SettingsOptionStep`, `LobbyModes` / `StartMode`, `InWorld` /
+  `CurrentMode` / `LobbyCanOpen`, `PlayerCharacter`, `DrawHud` (game geometry under the panels, e.g. name tags).
+- Clean exit: `ExitProcess` and `TerminateProcess(self)` are hooked; the session is left cleanly before the process
+  ends, so the others see "host left" / "<name> left the game" at once instead of after the 10 s timeout. Banners:
+  **HOST LEFT** for guests, "<name> lost the connection" for a timeout. UDP sends its Disconnect 4 times (was 2).
+- Overlay: holds no backbuffer reference between frames; releases everything on device removed/reset and at exit;
+  logs the Present / ResizeBuffers threads. `Mod::DebugOverlay` / `SetDebugOverlay`, `Coop::SetName`.
+
 ## v0.4.0 — 2026-10-15
 
 Game settings in the CO-OP panel, saving settings, a virtual gamepad for tests (new features, so a minor release). No

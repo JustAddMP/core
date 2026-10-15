@@ -21,7 +21,7 @@ raises no event; remote close, timeout, refused and failed connects raise `Disco
 
 | Value | Where | Rule |
 |---|---|---|
-| `kProtocolVersion` (session.h, currently 6; 5 added the session password, 6 Kicked and the ban Reject) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
+| `kProtocolVersion` (session.h, currently 7; 5 added the session password, 6 Kicked and the ban Reject, 7 the lobby) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
 | `modBuild` (SessionConfig, derived by the dll from `GameInfo::modVersion`, "1.2.3" -> 10203) | Hello | Must match exactly (sync code must be identical on both sides). |
 | UDP wire version (byte 2 of every datagram, currently 1) | UDP header | Datagrams with another version are ignored. Bump only if the UDP framing changes. |
 | Lobby data `mc_version` / `mc_proto` | Steam lobby | Informational (shown before connecting); the Hello check is authoritative. |
@@ -148,8 +148,42 @@ App id allocation (u16, varint-encoded):
 
 | Range | Owner |
 |---|---|
-| 0x0000-0x00FF | core: tests / debug |
+| 0x0000-0x00FF | core: 0x0020-0x0022 the lobby (below); the rest tests / debug |
 | 0x0100-0xFFFF | the game (its repo documents its ids; e.g. MafiaDE: 0x01xx player sync, 0x02xx world) |
+
+### Lobby
+
+`net::Lobby` (src/net/lobby.h) runs on top of a session; the dll attaches one to every session. Players gather before
+a game starts: guests toggle "ready", the host picks a game mode (an index into the game's `GameModule::LobbyModes`)
+and starts, and every player loads that mode at the same moment. The host also says when it is already playing, so a
+player who joins later can follow it ("JOIN GAME"). Host-authoritative: only the host sends state and starts; a
+State/Start from anyone else (a guest's Broadcast the host relays) is ignored.
+
+| App id | Name | Dir | Channel | Body |
+|---|---|---|---|---|
+| 0x0020 | LobbyState | host -> guests (`Broadcast`) | R | u8 version (1), u8 mode (0xFF none), u8 inGame, u8 gameMode (0xFF none), u32 startSeq, u8 count, count x {u8 id, u8 ready} |
+| 0x0021 | LobbyReady | guest -> host (`SendToHost`) | R | u8 ready |
+| 0x0022 | LobbyStart | host -> guests (`Broadcast`) | R | u8 mode, u32 startSeq |
+
+- The host sends LobbyState whenever something in it changes and whenever the player set changes (a newcomer has
+  none; he starts not ready, a leaver is forgotten).
+- `Lobby::Start(mode)` refuses while a guest is not ready (unless forced), sends LobbyStart, clears every ready flag
+  and calls `onStart(mode)` on the host itself; guests call it when the LobbyStart arrives. A start is only acted on
+  once (`startSeq` must grow); a late joiner learns `startSeq` from the state and never replays an old start.
+- `SetInGame(inGame, mode)`: the dll reports `GameModule::InWorld()` / `CurrentMode()` of the host every frame.
+- The host also writes `mc_state` (`lobby` / `playing`) and `mc_mode` into the Steam lobby data (informational).
+- Tests: `tests/net_lobby.cpp` (ready reaches everyone, start waits for ready and reaches every guest once, guests
+  cannot start or fake the state, late joiner, clean leaving below).
+
+### Leaving cleanly
+
+`Session::Leave()` disconnects every peer through the transport, which tells the other side at once (UDP: a
+Disconnect packet sent 4 times; Steam: a reliable Disconnect): a guest sees "host closed the session" (the dll shows
+**HOST LEFT**), the host sees PeerLeft "closed by remote" ("<name> left the game"), within milliseconds instead of the
+10 s timeout. The dll also leaves cleanly when the game process ends normally: `ExitProcess` and
+`TerminateProcess(self)` are hooked (dll/mod.cpp) and call `Coop::Shutdown()` first (verified in Mafia DE: closing the
+window ends the process through ExitProcess; the others were told 3 ms later). A process killed from outside (Task
+Manager, `taskkill /F`) cannot say goodbye; the others then time out after 10 s.
 
 ## UDP transport
 
