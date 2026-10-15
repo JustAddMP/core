@@ -90,6 +90,10 @@ std::string MultiTransport::PeerAddress(PeerId peer) const {
     return t ? t->PeerAddress(peer) : std::string();
 }
 
+void MultiTransport::MarkEstablished(PeerId peer) {
+    if (Transport* t = Owner(peer)) t->MarkEstablished(peer);
+}
+
 bool MultiTransport::IsHosting() const {
     for (auto& p : _parts)
         if (p->IsHosting()) return true;

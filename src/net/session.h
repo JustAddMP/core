@@ -51,6 +51,22 @@ struct SessionConfig {
     int authMaxFailures = 5;       // host: wrong answers per address within authWindowS before it locks out
     double authWindowS = 60.0;
     double authFailDelayS = 1.0;   // host: a wrong answer is rejected only after this long
+
+    // Host: per-guest rate limits (token buckets; docs/protocol.md "Rate limits"). Chat and app messages the host
+    // relays to other guests (target not the host) above these are dropped (not handled, not relayed) and counted
+    // (Session::RateLimits()). A rate <= 0 turns that limit off.
+    double chatPerS = 5.0;                   // chat messages per second
+    double chatBurst = 10.0;                 // chat messages at once
+    double relayBytesPerS = 64.0 * 1024;     // relayed app payload bytes per second
+    double relayBurstBytes = 128.0 * 1024;   // relayed app payload bytes at once (one larger message still passes
+                                             // when the bucket is full; it then has to refill)
+};
+
+// Host: what the rate limits dropped, summed over all guests since Host().
+struct RateLimitStats {
+    uint64_t chatDropped = 0;
+    uint64_t appDropped = 0;
+    uint64_t appBytesDropped = 0;
 };
 
 // Why the host rejected us (guest), from the Reject code. Values are the wire codes.
@@ -103,6 +119,7 @@ public:
     const std::string& LastError() const { return lastError_; }
     Transport& GetTransport() { return transport_; }
     const SessionConfig& Config() const { return cfg_; }
+    const RateLimitStats& RateLimits() const { return rateStats_; }
 
     // ---- session password ----
     // Host: change the required password at any time ("" = none; players already in stay). Guest: the password
@@ -141,6 +158,22 @@ private:
         std::string rejectReason;
     };
 
+    struct Bucket {  // token bucket
+        bool started = false;  // starts full
+        double tokens = 0;     // may go below 0 after one message larger than what was left
+        double last = 0;
+        // Takes cost if anything is left (a cost above the burst passes on a full bucket, then refills).
+        bool Take(double cost, double rate, double burst, double now);
+    };
+    struct GuestLimits {
+        Bucket chat, relay;
+        // dropped since the last rate-limit log line
+        uint32_t chatDropped = 0, appDropped = 0;
+        uint64_t appBytesDropped = 0;
+    };
+    void CountDropped(PlayerInfo& from, bool chat, size_t bytes);
+    void LogRateLimits(double now);
+
     void OnEvent(const Event& e);
     void HostOnMessage(PeerId peer, ByteReader& r, Reliability ch);
     void GuestOnMessage(ByteReader& r);
@@ -173,6 +206,10 @@ private:
     RejectReason lastReject_ = RejectReason::None;
     std::unordered_map<std::string, std::vector<double>> authFailures_;  // host: attempt key -> failure times
     double helloSentAt_ = 0, lastPing_ = 0, lastPingTable_ = 0;
+    std::unordered_map<PlayerId, GuestLimits> limits_;  // host: per guest
+    RateLimitStats rateStats_;
+    double lastRateLog_ = -1e9;
+    bool rateLogPending_ = false;
     bool welcomed_ = false;
 };
 

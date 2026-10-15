@@ -4,7 +4,8 @@
 //   2. Session (host and guest) over a fake in-process Transport: random, truncated and bit-flipped session messages,
 //      connects and disconnects; plus a few exact regression checks (Welcome validation, name cleaning).
 //   3. UdpTransport over real sockets: garbage datagrams, a hand-made client that completes the cookie handshake and
-//      then sends random DATA (acks, units, fragments); the per-Poll event cap and the per-address connection cap.
+//      then sends random DATA (acks, units, fragments); the per-Poll event cap, the per-address connection cap and
+//      eviction of connections without a session handshake when the slots are full.
 // Prints PASS/FAIL per check, exits non-zero on any failure.
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -516,7 +517,8 @@ std::vector<uint8_t> Header(uint8_t type, uint32_t token) {
 }
 
 // Cookie handshake by hand. Returns the packet type the host finally answered (3 ACCEPT, 8 REFUSE, 0 nothing).
-uint8_t Handshake(Raw& raw, UdpTransport& host, const EventHandler& h, uint32_t token) {
+// poll pumps the host side (its transport, or the session on top of it).
+uint8_t Handshake(Raw& raw, const std::function<void()>& poll, uint32_t token) {
     raw.token = token;
     uint64_t cookie = 0;
     const double end = Seconds() + 2;
@@ -530,7 +532,7 @@ uint8_t Handshake(Raw& raw, UdpTransport& host, const EventHandler& h, uint32_t 
             while (w.Size() < 64) w.U8(0);
             raw.Send(w.Take());
         }
-        host.Poll(h);
+        poll();
         std::vector<uint8_t> in;
         while (raw.Recv(in)) {
             if (in.size() < 8) continue;
@@ -602,7 +604,7 @@ void FuzzUdp(Rng& rng, int loops) {
         if (e.type == EventType::Disconnected) dropped = true;
     };
     Raw raw(port);
-    const bool hs = Handshake(raw, host, h, 0x12345679) == 3;
+    const bool hs = Handshake(raw, [&] { host.Poll(h); }, 0x12345679) == 3;
     uint64_t datagrams = 0;
     const double t0 = Seconds();
     uint16_t seqBase = 0;
@@ -611,7 +613,7 @@ void FuzzUdp(Rng& rng, int loops) {
             dropped = false;
             seqBase = 0;
             ++rehandshakes;
-            Handshake(raw, host, h, rng.U32() | 1);
+            Handshake(raw, [&] { host.Poll(h); }, rng.U32() | 1);
         }
         for (int i = 0; i < 32; ++i, ++datagrams) raw.Send(RandomDatagram(rng, raw.token, seqBase));
         if (rng.Chance(5)) seqBase = static_cast<uint16_t>(seqBase + rng.Below(64));
@@ -665,7 +667,7 @@ void UdpEventCap() {
         if (e.type == EventType::Message) ++messages;
     };
     Raw raw(host.BoundPort());
-    const bool hs = Handshake(raw, host, h, 0x0BADF00D) == 3;
+    const bool hs = Handshake(raw, [&] { host.Poll(h); }, 0x0BADF00D) == 3;
     const int kDatagrams = 200;
     size_t perDatagram = 0;
     for (int i = 0; i < kDatagrams; ++i) {
@@ -697,23 +699,108 @@ void UdpEventCap() {
           "udp: events per Poll are capped, none lost", d);
 }
 
-// Regression: one address cannot take every incoming slot.
+// Regression: one address cannot take every incoming slot. At the cap, a new connection from that address evicts
+// its oldest one that has not completed the session handshake; once all are established, it is refused.
 void UdpPerAddressCap() {
     UdpTransport host;
     host.Host(0);
-    EventHandler h = [](const Event&) {};
+    std::vector<PeerId> connected;
+    std::set<PeerId> dropped;
+    EventHandler h = [&](const Event& e) {
+        if (e.type == EventType::Connected) connected.push_back(e.peer);
+        if (e.type == EventType::Disconnected) dropped.insert(e.peer);
+    };
+    const int cap = UdpOptions{}.maxPeersPerAddress, n = cap + 2;
     std::vector<std::unique_ptr<Raw>> raws;
     std::string results;
-    int accepted = 0, refused = 0;
-    for (int i = 0; i < 6; ++i) {
+    int accepted = 0;
+    for (int i = 0; i < n; ++i) {
         raws.push_back(std::make_unique<Raw>(host.BoundPort()));
-        const uint8_t r = Handshake(*raws.back(), host, h, 0x1000u + static_cast<uint32_t>(i));
+        const uint8_t r = Handshake(*raws.back(), [&] { host.Poll(h); }, 0x1000u + static_cast<uint32_t>(i));
         results += r == 3 ? "A" : r == 8 ? "R" : "-";
         accepted += r == 3;
-        refused += r == 8;
     }
-    const int cap = UdpOptions{}.maxPeersPerAddress;
-    Check(accepted == cap && refused == 6 - cap, "udp: per-address connection cap", results);
+    for (int i = 0; i < 20; ++i) host.Poll(h);
+    // the evicted ones are the oldest, and they were told (DISCONNECT, type 7)
+    bool oldestEvicted = connected.size() == static_cast<size_t>(n) && dropped.size() == static_cast<size_t>(n - cap);
+    for (int i = 0; i < n - cap && oldestEvicted; ++i) oldestEvicted = dropped.count(connected[i]) != 0;
+    bool told = true;
+    for (int i = 0; i < n - cap; ++i) {
+        bool gotDisconnect = false;
+        std::vector<uint8_t> in;
+        while (raws[i]->Recv(in)) gotDisconnect = gotDisconnect || (in.size() >= 8 && in[3] == 7);
+        told = told && gotDisconnect;
+    }
+    char d[160];
+    std::snprintf(d, sizeof(d), "%s, %zu live, %llu evicted%s", results.c_str(), connected.size() - dropped.size(),
+                  static_cast<unsigned long long>(host.Evictions()), told ? ", told" : ", NOT told");
+    Check(accepted == n && connected.size() - dropped.size() == static_cast<size_t>(cap) && oldestEvicted && told &&
+              host.Evictions() == static_cast<uint64_t>(n - cap),
+          "udp: per-address cap evicts oldest half-open", d);
+
+    // all live connections established: the next one is refused, nobody evicted
+    for (PeerId p : connected)
+        if (!dropped.count(p)) host.MarkEstablished(p);
+    Raw extra(host.BoundPort());
+    const uint8_t r = Handshake(extra, [&] { host.Poll(h); }, 0x2000u);
+    Check(r == 8 && host.Evictions() == static_cast<uint64_t>(n - cap), "udp: established players never evicted",
+          r == 8 ? "refused" : "not refused");
+}
+
+// Slots full of connections that never send a Hello still admit a real player, who is then never evicted.
+void UdpEvictHalfOpen() {
+    UdpOptions o;
+    o.maxPeers = 4;
+    o.maxPeersPerAddress = 64;  // everything here comes from 127.0.0.1: test the total limit
+    UdpTransport hostT(o);
+    SessionConfig cfg;
+    cfg.modBuild = kBuild;
+    cfg.playerName = "Host";
+    Session host(hostT, cfg);
+    if (!host.Host(0)) {
+        Check(false, "udp evict: host bind");
+        return;
+    }
+    std::vector<std::unique_ptr<Raw>> raws;
+    int halfOpen = 0;
+    for (int i = 0; i < o.maxPeers; ++i) {
+        raws.push_back(std::make_unique<Raw>(hostT.BoundPort()));
+        halfOpen += Handshake(*raws.back(), [&] { host.Poll(); }, 0x3000u + static_cast<uint32_t>(i)) == 3;
+    }
+    UdpTransport guestT;
+    cfg.playerName = "Guest";
+    Session guest(guestT, cfg);
+    bool joined = false;
+    guest.onJoined = [&] { joined = true; };
+    guest.Join("127.0.0.1:" + std::to_string(hostT.BoundPort()));
+    const double end = Seconds() + 4;
+    while (!joined && Seconds() < end) {
+        host.Poll();
+        guest.Poll();
+        Sleep(1);
+    }
+    char d[160];
+    std::snprintf(d, sizeof(d), "%d half-open first; joined=%d, players %zu, evicted %llu", halfOpen, joined,
+                  host.Players().size(), static_cast<unsigned long long>(hostT.Evictions()));
+    Check(halfOpen == o.maxPeers && joined && host.Players().size() == 2 && hostT.Evictions() >= 1,
+          "udp: full of half-open, real player admitted", d);
+
+    // more half-open connections keep coming: they evict each other, never the player
+    int more = 0;
+    for (int i = 0; i < 2 * o.maxPeers; ++i) {
+        raws.push_back(std::make_unique<Raw>(hostT.BoundPort()));
+        more += Handshake(*raws.back(), [&] { host.Poll(); guest.Poll(); }, 0x4000u + static_cast<uint32_t>(i)) == 3;
+    }
+    for (int i = 0; i < 50; ++i) {
+        host.Poll();
+        guest.Poll();
+        Sleep(1);
+    }
+    std::snprintf(d, sizeof(d), "%d/%d more accepted, players %zu, guest %s, evicted %llu", more, 2 * o.maxPeers,
+                  host.Players().size(), guest.State() == SessionState::Connected ? "connected" : "DROPPED",
+                  static_cast<unsigned long long>(hostT.Evictions()));
+    Check(more == 2 * o.maxPeers && host.Players().size() == 2 && guest.State() == SessionState::Connected,
+          "udp: player kept while half-open ones churn", d);
 }
 
 }  // namespace
@@ -738,6 +825,7 @@ int main(int argc, char** argv) {
     FuzzUdp(rng, 1000);
     UdpEventCap();
     UdpPerAddressCap();
+    UdpEvictHalfOpen();
 
     WSACleanup();
     std::printf("\n%s: %d failure(s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures);

@@ -35,6 +35,7 @@ public:
     bool IsHosting() const override;
     const char* Name() const override { return _name.c_str(); }
     std::string PeerAddress(PeerId peer) const override;
+    void MarkEstablished(PeerId peer) override;
 
     // Which part a peer belongs to (nullptr if unknown).
     Transport* Owner(PeerId peer) const;

@@ -116,6 +116,7 @@ struct Peer {
     uint32_t token = 0;  // connection nonce chosen by the connecting side
     PeerState state = PeerState::Connecting;
     bool outgoing = false;  // we initiated it
+    bool established = false;  // incoming: the session finished its handshake (Transport::MarkEstablished)
     uint64_t cookie = 0;    // outgoing: challenge cookie received
     double created = 0, lastRecv = 0, lastConnectSend = 0, lastPing = 0;
 
@@ -182,6 +183,7 @@ struct UdpTransport::Impl {
     uint8_t secret[16] = {};
     PeerId nextId = 1;
     std::unordered_map<PeerId, Peer> peers;
+    uint64_t evictions = 0;
     std::unordered_map<uint64_t, PeerId> byAddr;
     std::vector<PendingEvent> events;
     std::unordered_set<PeerId> closedLocally;  // peers Disconnect()ed while events for them are pending
@@ -477,17 +479,37 @@ struct UdpTransport::Impl {
             }
             Drop(*existing, DisconnectReason::Remote);  // same address reconnected with a new session
         }
-        size_t incoming = 0, fromAddr = 0;
-        for (auto& kv : peers) {
-            if (kv.second.outgoing) continue;
-            ++incoming;
-            if (kv.second.addr.sin_addr.s_addr == from.sin_addr.s_addr) ++fromAddr;
-        }
-        // Per-address cap: otherwise one machine (any source port completes the cookie handshake) could hold every
-        // slot with connections that never get past the session handshake, and nobody else could join.
-        if (static_cast<int>(incoming) >= opt.maxPeers || static_cast<int>(fromAddr) >= opt.maxPeersPerAddress) {
-            refuse(kRefuseFull);
-            return;
+        // Limits: all incoming connections (maxPeers) and those from one IPv4 address (maxPeersPerAddress; any source
+        // port completes the cookie handshake). At a limit, the oldest connection that has not completed the
+        // session handshake makes room, so connections that never send a valid Hello cannot hold every slot.
+        // Established players are never evicted; with only those left, the new one is refused.
+        for (;;) {
+            size_t incoming = 0, fromAddr = 0;
+            for (auto& kv : peers) {
+                if (kv.second.outgoing) continue;
+                ++incoming;
+                if (kv.second.addr.sin_addr.s_addr == from.sin_addr.s_addr) ++fromAddr;
+            }
+            const bool addrFull = static_cast<int>(fromAddr) >= opt.maxPeersPerAddress;
+            if (static_cast<int>(incoming) < opt.maxPeers && !addrFull) break;
+            Peer* victim = nullptr;
+            for (auto& kv : peers) {
+                Peer& c = kv.second;
+                if (c.outgoing || c.established) continue;
+                if (addrFull && c.addr.sin_addr.s_addr != from.sin_addr.s_addr) continue;
+                if (!victim || c.created < victim->created || (c.created == victim->created && c.id < victim->id))
+                    victim = &c;
+            }
+            if (!victim) {
+                refuse(kRefuseFull);
+                return;
+            }
+            Log(kInfo, "udp: full; evicting peer %llu (%s), no session handshake after %.1f s",
+                static_cast<unsigned long long>(victim->id), AddrStr(victim->addr).c_str(), Now() - victim->created);
+            ++evictions;
+            SendControl(*victim, kDisconnect);
+            SendControl(*victim, kDisconnect);
+            Drop(*victim, DisconnectReason::Refused);
         }
         Peer& p = NewPeer(from, nonce, false);
         MarkConnected(p);
@@ -891,6 +913,12 @@ void UdpTransport::Disconnect(PeerId id) {
 }
 
 void UdpTransport::Close() { impl_->CloseAll(); }
+
+void UdpTransport::MarkEstablished(PeerId id) {
+    if (Peer* p = impl_->Find(id)) p->established = true;
+}
+
+uint64_t UdpTransport::Evictions() const { return impl_->evictions; }
 
 std::string UdpTransport::PeerAddress(PeerId id) const {
     auto it = impl_->peers.find(id);

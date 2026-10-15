@@ -87,6 +87,9 @@ Session::~Session() { Leave(); }
 void Session::Reset() {
     players_.clear();
     pending_.clear();
+    limits_.clear();
+    rateStats_ = {};
+    rateLogPending_ = false;
     localId_ = kNoPlayer;
     hostPeer_ = kInvalidPeer;
     welcomed_ = false;
@@ -169,6 +172,7 @@ void Session::Poll() {
     double now = Now();
 
     if (state_ == SessionState::Hosting) {
+        if (rateLogPending_) LogRateLimits(now);
         std::vector<PeerId> drop, rejectNow;
         for (auto& [peer, pend] : pending_) {
             if (pend.kickAt > 0) {
@@ -418,6 +422,7 @@ void Session::HostAdmit(PeerId peer, const std::string& name, const std::string&
         return;
     }
     pending_.erase(peer);
+    transport_.MarkEstablished(peer);  // a real player now: the transport never evicts it to make room
     PlayerInfo info{id, CleanName(name), CleanModel(model), peer, 0};
     players_.push_back(info);
     std::sort(players_.begin(), players_.end(), [](const PlayerInfo& a, const PlayerInfo& b) { return a.id < b.id; });
@@ -450,6 +455,8 @@ void Session::HostRemovePlayer(PeerId peer, const std::string& reason) {
     if (it == players_.end()) return;
     PlayerInfo info = *it;
     players_.erase(it);
+    if (rateLogPending_) LogRateLimits(-1);  // flush what this player had dropped before the id is reused
+    limits_.erase(info.id);
     ByteWriter w(64);
     w.U8(kPeerLeft);
     w.U8(info.id);
@@ -497,6 +504,11 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
             std::string text = r.Str(kMaxChatLen);
             if (!r.Ok()) return;
             PlayerId fid = from->id;
+            if (cfg_.chatPerS > 0 &&
+                !limits_[fid].chat.Take(1.0, cfg_.chatPerS, std::max(cfg_.chatBurst, 1.0), Now())) {
+                CountDropped(*from, true, 0);
+                return;
+            }
             ByteWriter w(text.size() + 8);
             w.U8(kChat);
             w.U8(fid);
@@ -514,6 +526,14 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
             if (!r.Ok()) return;
             PlayerId fid = from->id;
             Reliability rel = (flags & kAppFlagReliable) ? Reliability::Reliable : ch;
+            // Relayed messages (to another guest or everyone) cost the sender's relay budget; over it the whole
+            // message is dropped, so host and guests see the same thing.
+            if (target != kHostPlayer && cfg_.relayBytesPerS > 0 &&
+                !limits_[fid].relay.Take(static_cast<double>(payload.size()), cfg_.relayBytesPerS,
+                                         std::max(cfg_.relayBurstBytes, 1.0), Now())) {
+                CountDropped(*from, false, payload.size());
+                return;
+            }
             if (target == kHostPlayer || target == kAllPlayers) DispatchApp(id, fid, payload);
             if (target != kHostPlayer) {
                 ByteWriter w = AppHeader(id, fid, target, rel);
@@ -528,6 +548,53 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
         }
         default:
             break;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// rate limits (host)
+
+bool Session::Bucket::Take(double cost, double rate, double burst, double now) {
+    if (!started) {
+        started = true;
+        tokens = burst;
+    } else {
+        tokens = std::min(burst, tokens + (now - last) * rate);
+    }
+    last = now;
+    if (tokens <= 0) return false;
+    tokens -= cost;  // may go below 0 for one large message: then it has to refill first
+    if (tokens < 0) tokens = std::max(tokens, -burst);
+    return true;
+}
+
+void Session::CountDropped(PlayerInfo& from, bool chat, size_t bytes) {
+    GuestLimits& g = limits_[from.id];
+    if (chat) {
+        ++g.chatDropped;
+        ++rateStats_.chatDropped;
+    } else {
+        ++g.appDropped;
+        g.appBytesDropped += bytes;
+        ++rateStats_.appDropped;
+        rateStats_.appBytesDropped += bytes;
+    }
+    rateLogPending_ = true;
+    LogRateLimits(Now());
+}
+
+// At most one log line per second (per guest that dropped something since the last one). now < 0: log right away.
+void Session::LogRateLimits(double now) {
+    if (now >= 0 && now - lastRateLog_ < 1.0) return;
+    if (now >= 0) lastRateLog_ = now;
+    rateLogPending_ = false;
+    for (auto& [id, g] : limits_) {
+        if (!g.chatDropped && !g.appDropped) continue;
+        const PlayerInfo* p = FindPlayer(id);
+        Log(kWarn, "session: rate limit: player %u '%s': dropped %u chat, %u relayed app messages (%llu bytes)", id,
+            p ? p->name.c_str() : "?", g.chatDropped, g.appDropped, static_cast<unsigned long long>(g.appBytesDropped));
+        g.chatDropped = g.appDropped = 0;
+        g.appBytesDropped = 0;
     }
 }
 

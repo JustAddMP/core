@@ -103,6 +103,20 @@ The game layer registers handlers (in `GameModule::OnSessionStart`, `include/mc/
 The host always rewrites `from` with the real sender (guests cannot spoof each other) and relays on the same
 channel the sender used (flags bit0).
 
+### Rate limits
+
+The host keeps two token buckets per guest (`SessionConfig`, a rate <= 0 turns one off):
+
+| Limit | Default | Applies to |
+|---|---|---|
+| `chatPerS` / `chatBurst` | 5 messages/s, burst 10 | Chat from a guest |
+| `relayBytesPerS` / `relayBurstBytes` | 64 KB/s, burst 128 KB (payload bytes) | App messages the host relays (target another guest or 0xFF) |
+
+A message over its limit is dropped whole (the host neither handles nor relays it, so host and guests stay
+consistent; reliable ones too) and counted in `Session::RateLimits()`; the host logs the drops per guest at most once
+per second. A message larger than the burst still passes when the bucket is full and then has to refill. App
+messages to the host only (`SendToHost`) are not limited. Nothing changes on the wire.
+
 App id allocation (u16, varint-encoded):
 
 | Range | Owner |
@@ -134,7 +148,11 @@ Handshake (stateless anti-spoof): client sends CONNECT(cookie 0) every 250 ms. T
 CHALLENGE(cookie = SipHash-2-4(secret, ip, port, nonce, 5-second time bucket)) without allocating anything; the
 padded CONNECT is always larger than the CHALLENGE, so the host cannot be used as an amplifier. The client
 repeats CONNECT with the cookie; the host accepts cookies from the current or previous bucket, creates the
-connection and sends ACCEPT (re-sent if a duplicate CONNECT arrives). Any DATA/PING from the host also completes the
+connection and sends ACCEPT (re-sent if a duplicate CONNECT arrives). Incoming connections are limited (`UdpOptions::maxPeers` 8,
+`maxPeersPerAddress` 4); at a limit the host evicts its oldest incoming connection that has not completed the
+session handshake (DISCONNECT to it, `Disconnected(Refused)` locally; the session marks admitted players with
+`Transport::MarkEstablished`) and accepts the new one. Established players are never evicted; with only those left
+the new connection gets REFUSE(full). Any DATA/PING from the host also completes the
 client's handshake if ACCEPT was lost. The client gives up after 10 s (`ConnectFailed`).
 
 Keepalive: PING every 0.5 s; a peer is dropped after 10 s without any packet (`Timeout`). PING/PONG gives the RTT

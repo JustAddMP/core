@@ -16,6 +16,8 @@ struct UdpOptions {
     double pingIntervalS = 0.5;     // keepalive / RTT probe
     int maxPeers = 8;               // incoming connection limit when hosting
     int maxPeersPerAddress = 4;     // incoming connections from one IPv4 address (any port)
+    // When a limit above is reached, a new connection evicts the oldest incoming one the session has not marked
+    // established (MarkEstablished: handshake done); established players are never evicted.
     uint16_t defaultPort = kDefaultPort;  // Connect("ip") without a port
     // Test-only network simulation, applied to datagrams this transport SENDS.
     float simLoss = 0.0f;           // 0..1 drop probability
@@ -44,6 +46,7 @@ public:
     bool IsHosting() const override;
     const char* Name() const override { return "udp"; }
     std::string PeerAddress(PeerId peer) const override;  // "a.b.c.d"
+    void MarkEstablished(PeerId peer) override;
 
     // Options may be changed at any time (e.g. switch simulation on/off mid-test).
     void SetOptions(const UdpOptions& opt);
@@ -51,6 +54,8 @@ public:
     uint16_t BoundPort() const;
     // Send everything queued now (Poll() does this too).
     void Flush();
+    // Incoming connections evicted to make room (see UdpOptions::maxPeers).
+    uint64_t Evictions() const;
 
     struct Impl;
 

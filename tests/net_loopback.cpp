@@ -38,7 +38,10 @@ void Check(bool ok, const char* name, const std::string& detail = {}) {
     if (!ok) ++g_failures;
 }
 
+int g_rateLogLines = 0;  // "rate limit:" warnings seen
+
 void PrintLog(int level, const char* msg) {
+    if (std::strstr(msg, "rate limit:")) ++g_rateLogLines;
     if (level >= 2 || g_verbose) std::printf("    [%7.3f] %s\n", Seconds() - g_t0, msg);
 }
 
@@ -133,6 +136,106 @@ void TestWire() {
     Check(ok && le && failedFlag && bad.Failed(), "wire: roundtrip + bounds");
 }
 
+// ---- host relay rate limits: a flooding guest is throttled, the other guest's traffic still flows ----
+void TestRateLimits() {
+    Node host("Host", BaseConfig());
+    if (!host.session.Host(0)) {
+        Check(false, "rate limits: host bind");
+        return;
+    }
+    const std::string addr = "127.0.0.1:" + std::to_string(host.transport.BoundPort());
+    Node flood("Flood", BaseConfig()), nice("Nice", BaseConfig());
+    flood.session.Join(addr);
+    nice.session.Join(addr);
+    Nodes all{&host, &flood, &nice};
+    if (!Pump(all, 5, [&] { return flood.joined && nice.joined && host.session.Players().size() == 3; })) {
+        Check(false, "rate limits: handshake");
+        return;
+    }
+    const SessionConfig& cfg = host.session.Config();
+    const PlayerId floodId = flood.session.LocalId(), niceId = nice.session.LocalId();
+
+    // what each side receives, by sender
+    int niceRelayFromFlood = 0, floodRelayFromNice = 0, hostDirectFromFlood = 0;
+    size_t niceRelayBytes = 0;
+    std::vector<std::string> hostChatFrom[4];
+    host.session.onChat = [&](PlayerId from, const std::string& t) {
+        if (from < 4) hostChatFrom[from].push_back(t);
+    };
+    std::vector<std::string> niceChatFromFlood, floodChatFromNice;
+    nice.session.onChat = [&](PlayerId from, const std::string& t) {
+        if (from == floodId) niceChatFromFlood.push_back(t);
+    };
+    flood.session.onChat = [&](PlayerId from, const std::string& t) {
+        if (from == niceId) floodChatFromNice.push_back(t);
+    };
+    nice.session.On(200, [&](PlayerId from, ByteReader& r) {
+        if (from == floodId) {
+            ++niceRelayFromFlood;
+            niceRelayBytes += r.Rest().size();
+        }
+    });
+    flood.session.On(200, [&](PlayerId from, ByteReader&) { floodRelayFromNice += from == niceId; });
+    host.session.On(200, [](PlayerId, ByteReader&) {});
+    host.session.On(201, [&](PlayerId from, ByteReader&) { hostDirectFromFlood += from == floodId; });
+
+    const double t0 = Seconds();
+    const int kChatFlood = 100, kRelayFlood = 40, kDirect = 50, kNiceChat = 3, kNiceRelay = 20;
+    const std::vector<uint8_t> big(8192, 0x5A), small(1024, 0x11);
+    for (int i = 0; i < kChatFlood; ++i) flood.session.SendChat("spam " + std::to_string(i));
+    for (int i = 0; i < kRelayFlood; ++i) flood.session.Broadcast(200, big);           // 320 KB relayed
+    for (int i = 0; i < kDirect; ++i) flood.session.SendToHost(201, U32Msg(i));       // to the host only: no limit
+    for (int i = 0; i < kNiceChat; ++i) nice.session.SendChat("hello " + std::to_string(i));
+    for (int i = 0; i < kNiceRelay; ++i) nice.session.Broadcast(200, small);
+    Pump(all, 3, [&] {
+        return hostDirectFromFlood >= kDirect && floodRelayFromNice >= kNiceRelay &&
+               floodChatFromNice.size() >= static_cast<size_t>(kNiceChat) &&
+               host.session.RateLimits().chatDropped + hostChatFrom[floodId].size() >= static_cast<size_t>(kChatFlood) &&
+               host.session.RateLimits().appDropped + niceRelayFromFlood >= static_cast<uint64_t>(kRelayFlood);
+    });
+    const double el = Seconds() - t0;
+    const RateLimitStats st = host.session.RateLimits();
+
+    // chat: about the burst (10) plus 5/s of refill got through
+    const int chatMax = static_cast<int>(cfg.chatBurst + cfg.chatPerS * el) + 1;
+    const int chatGot = static_cast<int>(hostChatFrom[floodId].size());
+    char d[240];
+    std::snprintf(d, sizeof(d), "%d/%d chat passed (max %d), host dropped %llu, guest saw %zu", chatGot, kChatFlood,
+                  chatMax, static_cast<unsigned long long>(st.chatDropped), niceChatFromFlood.size());
+    Check(chatGot >= static_cast<int>(cfg.chatBurst) && chatGot <= chatMax &&
+              st.chatDropped == static_cast<uint64_t>(kChatFlood - chatGot) &&
+              niceChatFromFlood.size() == static_cast<size_t>(chatGot),
+          "rate limit: chat flood throttled", d);
+
+    // relay: about the 128 KB burst plus 64 KB/s of refill (one message may overdraw the bucket)
+    const double relayMax = cfg.relayBurstBytes + cfg.relayBytesPerS * el + big.size();
+    std::snprintf(d, sizeof(d), "%d/%d relayed (%zu bytes, max %.0f), dropped %llu (%llu bytes)", niceRelayFromFlood,
+                  kRelayFlood, niceRelayBytes, relayMax, static_cast<unsigned long long>(st.appDropped),
+                  static_cast<unsigned long long>(st.appBytesDropped));
+    Check(niceRelayBytes >= cfg.relayBurstBytes && niceRelayBytes <= relayMax && st.appDropped > 0 &&
+              st.appDropped + niceRelayFromFlood == static_cast<uint64_t>(kRelayFlood) &&
+              st.appBytesDropped == st.appDropped * big.size(),
+          "rate limit: relayed app flood throttled", d);
+
+    std::snprintf(d, sizeof(d), "host<-flood direct %d/%d, flood<-nice chat %zu/%d relay %d/%d, host<-nice chat %zu",
+                  hostDirectFromFlood, kDirect, floodChatFromNice.size(), kNiceChat, floodRelayFromNice, kNiceRelay,
+                  hostChatFrom[niceId].size());
+    Check(hostDirectFromFlood == kDirect && floodChatFromNice.size() == static_cast<size_t>(kNiceChat) &&
+              floodRelayFromNice == kNiceRelay && hostChatFrom[niceId].size() == static_cast<size_t>(kNiceChat),
+          "rate limit: other traffic still flows", d);
+
+    // the buckets refill: after a pause the flooder can chat again; the log said so at most once per second
+    Pump(all, 1.2, nullptr);
+    const size_t before = niceChatFromFlood.size();
+    flood.session.SendChat("after the pause");
+    Pump(all, 2, [&] { return niceChatFromFlood.size() > before; });
+    const double total = Seconds() - t0;
+    std::snprintf(d, sizeof(d), "chat after pause %s; %d rate-limit log line(s) in %.1f s",
+                  niceChatFromFlood.size() > before ? "arrived" : "LOST", g_rateLogLines, total);
+    Check(niceChatFromFlood.size() > before && g_rateLogLines >= 1 && g_rateLogLines <= static_cast<int>(total) + 2,
+          "rate limit: refills; log at most 1/s", d);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -142,6 +245,7 @@ int main(int argc, char** argv) {
     SetLogSink(PrintLog);
 
     TestWire();
+    TestRateLimits();
 
     Node host("Host", BaseConfig());
     if (!host.session.Host(0)) {

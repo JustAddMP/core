@@ -74,6 +74,9 @@ public:
     // Where a peer connects from, for per-address limits (UDP: its IPv4 without the port). "" = no address (the
     // session then keys by peer id, e.g. a SteamID).
     virtual std::string PeerAddress(PeerId) const { return {}; }
+    // The session completed its handshake with this incoming peer (a real player now). A full transport may evict
+    // incoming connections that never got this far to make room for a new one; it never evicts these. Optional.
+    virtual void MarkEstablished(PeerId) {}
 };
 
 constexpr uint16_t kDefaultPort = 27960;
