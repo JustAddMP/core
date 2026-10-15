@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "dll/pending_join.h"
 #include "mc/game_module.h"
+#include "net/lobby.h"
 #include "net/multi_transport.h"
 #include "net/session.h"
 #include "net/steam_flat.h"
@@ -99,6 +100,13 @@ struct State {
     Mode retryMode = Mode::None;     // the join that was refused (JoinUdp: address, JoinLobby: lobbyId)
 
     PendingJoin pendingJoin;  // Steam join request, recorded by the callback, acted on by Tick (pending_join.h)
+
+    // pre-game lobby (net/lobby.h), attached to every session
+    net::Lobby gameLobby;
+    bool openLobby = false;       // joined while not in the world: the UI opens the lobby
+    std::string hostName;         // guest: the host's name (for "host left")
+    std::string steamLobbyState;  // host: last mc_state/mc_mode written to the Steam lobby
+    bool shutDown = false;
 };
 
 State& S() {
@@ -210,6 +218,7 @@ void Teardown() {
     State& s = S();
     s.teardown = false;
     GetGameModule().OnSessionEnd();
+    s.gameLobby.Detach();
     if (s.session) s.session->Leave();
     s.session.reset();
     s.net.reset();
@@ -236,6 +245,37 @@ void LogPlayers() {
     }
 }
 
+// The lobby's start (host pressed START; on guests it arrives with the session poll): load that mode here too.
+void OnLobbyStart(int mode) {
+    std::vector<LobbyMode> modes;
+    GetGameModule().LobbyModes(modes);
+    const std::string name = mode >= 0 && static_cast<size_t>(mode) < modes.size()
+                                 ? modes[static_cast<size_t>(mode)].name
+                                 : "mode " + std::to_string(mode);
+    MC_LOG_INFO("coop: lobby start: %s (mode %d)", name.c_str(), mode);
+    if (GetGameModule().StartMode(mode)) {
+        Notify("CO-OP", "Starting " + name + "...");
+    } else {
+        Notify("CO-OP", "The host started " + name + ". Go back to the main menu and open CO-OP > LOBBY to follow.",
+               true);
+    }
+}
+
+// Host: lobby state into the Steam lobby data (friends see it before joining).
+void UpdateSteamLobbyData() {
+    State& s = S();
+    if (s.steam != SteamState::Ready || !s.session || !s.session->IsHost() ||
+        s.lobby.GetState() != net::SteamLobby::State::InLobby)
+        return;
+    const bool playing = s.gameLobby.InGame();
+    const std::string mode = std::to_string(playing ? s.gameLobby.GameMode() : s.gameLobby.Mode());
+    const std::string state = std::string(playing ? "playing" : "lobby") + "|" + mode;
+    if (state == s.steamLobbyState) return;
+    s.steamLobbyState = state;
+    s.lobby.SetData("mc_state", playing ? "playing" : "lobby");
+    s.lobby.SetData("mc_mode", mode.c_str());
+}
+
 void MakeSession(std::unique_ptr<net::Transport> transport) {
     State& s = S();
     net::SessionConfig cfg;
@@ -249,6 +289,11 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     s.session = std::make_unique<net::Session>(*s.net, cfg);
     net::Session& session = *s.session;
     GetGameModule().OnSessionStart(session);
+    s.gameLobby.Attach(session);
+    s.gameLobby.onStart = [](int mode) { OnLobbyStart(mode); };
+    s.openLobby = false;
+    s.hostName.clear();
+    s.steamLobbyState.clear();
     MC_LOG_INFO("coop: session as '%s' over %s (protocol %u, build %08x)", session.Config().playerName.c_str(),
                 s.net->Name(), cfg.protocolVersion, cfg.modBuild);
 
@@ -258,7 +303,11 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
                     st.session->Players().size());
         LogPlayers();
         const net::PlayerInfo* host = st.session->FindPlayer(net::kHostPlayer);
-        Notify("CO-OP", "Connected to " + (host ? host->name : st.target) + "'s game");
+        st.hostName = host ? host->name : st.target;
+        Notify("CO-OP", "Connected to " + st.hostName + "'s game");
+        // At the main menu the lobby opens (ready up, pick a character, wait for the host's start); in the world the
+        // player drops in as before.
+        if (!GetGameModule().InWorld()) st.openLobby = true;
     };
     session.onPlayerJoined = [](const net::PlayerInfo& p) {
         MC_LOG_INFO("coop: player %u '%s' joined (%zu players)", p.id, p.name.c_str(), S().session->Players().size());
@@ -267,7 +316,9 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     session.onPlayerLeft = [](const net::PlayerInfo& p, const std::string& reason) {
         MC_LOG_INFO("coop: player %u '%s' left: %s", p.id, p.name.c_str(), reason.c_str());
         const bool kicked = reason.rfind("kicked", 0) == 0;  // "kicked by the host" / "kicked and banned by the host"
-        Notify("CO-OP", kicked ? p.name + " was " + reason : p.name + " left the game");
+        Notify("CO-OP", kicked                    ? p.name + " was " + reason
+                        : reason == "timed out" ? p.name + " lost the connection"
+                                                : p.name + " left the game");
         GetGameModule().OnPlayerLeft(p.id);
     };
     session.onChat = [](net::PlayerId from, const std::string& text) {
@@ -290,6 +341,10 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
             Notify("CO-OP", "You are banned from this session", true);
         } else if (st.session && st.session->WasKicked()) {
             Notify("CO-OP", reason, true);  // "You were kicked by the host[: reason]"
+        } else if (reason == "host closed the session") {
+            Notify("HOST LEFT", (st.hostName.empty() ? std::string("The host") : st.hostName) +
+                                    " left the game. The co-op session has ended.",
+                   true);
         } else {
             Notify("CO-OP", "Disconnected: " + reason, true);
         }
@@ -551,15 +606,29 @@ void Coop::Tick(float dt) {
     PollSteam();
     HandleJoinRequest();
     if (!s.started) TryStart();
+    if (s.shutDown) return;
     if (s.session) s.session->Poll();
+    if (s.session && s.session->IsActive()) {
+        if (s.session->IsHost()) s.gameLobby.SetInGame(GetGameModule().InWorld(), GetGameModule().CurrentMode());
+        s.gameLobby.Tick();
+        UpdateSteamLobbyData();
+    }
     if (s.session) GetGameModule().SessionTick(dt);
     if (s.teardown) Teardown();
 }
 
 void Coop::Shutdown() {
     State& s = S();
-    if (s.session) s.session->Leave();
-    if (s.steam == SteamState::Ready) s.lobby.Leave();
+    if (s.shutDown) return;
+    s.shutDown = true;
+    if (s.session) {
+        const size_t others = s.session->Players().empty() ? 0 : s.session->Players().size() - 1;
+        MC_LOG_INFO("coop: shutdown: leaving the session as %s (%zu other player(s) told)",
+                    s.session->IsHost() ? "host" : "guest", others);
+        s.gameLobby.Detach();
+        s.session->Leave();  // clean transport disconnects: the others see "host left" / "left the game" at once
+    }
+    if (s.steam == SteamState::Ready && s.lobby.GetState() != net::SteamLobby::State::Idle) s.lobby.Leave();
 }
 
 // ---- runtime control -------------------------------------------------------------------------------------------------
@@ -687,6 +756,74 @@ bool Coop::Unban(size_t index) {
     return s.session && s.session->IsHost() && s.session->Unban(index);
 }
 
+// ---- lobby ----------------------------------------------------------------------------------------------------------
+namespace {
+bool ModeAvailable(int mode) {
+    std::vector<LobbyMode> modes;
+    GetGameModule().LobbyModes(modes);
+    return mode >= 0 && static_cast<size_t>(mode) < modes.size() && modes[static_cast<size_t>(mode)].available;
+}
+}  // namespace
+
+void Coop::SetReady(bool ready) {
+    State& s = S();
+    if (!s.session || !s.session->IsActive() || s.session->IsHost()) return;
+    MC_LOG_INFO("coop: lobby: %s", ready ? "ready" : "not ready");
+    s.gameLobby.SetReady(ready);
+}
+
+void Coop::SetLobbyMode(int mode) {
+    State& s = S();
+    if (s.session && s.session->IsHost()) s.gameLobby.SetMode(mode);
+}
+
+bool Coop::StartGame(bool force) {
+    State& s = S();
+    if (!s.session || !s.session->IsHost()) return false;
+    const int mode = s.gameLobby.Mode();
+    if (!ModeAvailable(mode)) {
+        Notify("CO-OP", "This mode is not available yet", true);
+        return false;
+    }
+    if (!s.gameLobby.Start(mode, force)) {
+        Notify("CO-OP", "Waiting for every player to be ready", true);
+        return false;
+    }
+    return true;  // onStart already loaded it here (OnLobbyStart)
+}
+
+bool Coop::JoinRunningGame() {
+    State& s = S();
+    if (!s.session || !s.session->IsActive() || s.session->IsHost() || !s.gameLobby.InGame()) return false;
+    const int mode = s.gameLobby.GameMode();
+    if (!ModeAvailable(mode)) {
+        Notify("CO-OP", "The host is playing a mode you cannot join from the lobby yet. Load the same game yourself.",
+               true);
+        return false;
+    }
+    OnLobbyStart(mode);
+    return true;
+}
+
+bool Coop::PopOpenLobby() {
+    State& s = S();
+    if (!s.openLobby) return false;
+    s.openLobby = false;
+    return true;
+}
+
+std::string Coop::Name() { return S().name; }
+std::string Coop::EffectiveName() { return PlayerName(); }
+
+void Coop::SetName(const std::string& name) {
+    State& s = S();
+    s.name = name;
+    if (!core::Config::Get().Set("name", name)) MC_LOG_WARN("coop: could not save name = %s", name.c_str());
+    MC_LOG_INFO("coop: player name set to '%s'", name.c_str());
+    Notify("CO-OP", s.session ? "Name saved: " + PlayerName() + ". It is used from your next co-op session."
+                              : "Name saved: " + PlayerName());
+}
+
 Coop::Info Coop::GetInfo() {
     State& s = S();
     Info info;
@@ -716,8 +853,15 @@ Coop::Info Coop::GetInfo() {
             row.you = p.id == session.LocalId();
             row.pingMs = row.host ? -1 : static_cast<int>(p.rttMs + 0.5f);
             row.health = GetGameModule().PlayerHealth(p.id);
+            row.ready = s.gameLobby.Ready(p.id);
+            row.character = GetGameModule().PlayerCharacter(p.id);
             info.players.push_back(row);
         }
+        info.lobbyMode = s.gameLobby.Mode();
+        info.hostInGame = s.gameLobby.InGame();
+        info.hostGameMode = s.gameLobby.GameMode();
+        info.allReady = s.gameLobby.AllReady();
+        info.ready = s.gameLobby.Ready(session.LocalId());
     } else if (s.mode == Mode::JoinLobby) {
         info.phase = Phase::Joining;
     } else if (s.mode != Mode::None) {

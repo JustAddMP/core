@@ -2,6 +2,7 @@
 
 #include "core/config.h"
 #include "core/crash.h"
+#include "core/hook.h"
 #include "core/log.h"
 #include "dll/coop.h"
 #include "dll/coop_ui.h"
@@ -11,6 +12,9 @@
 #include "render/present_hook.h"
 
 #include <windows.h>
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <vector>
 
 namespace mc {
@@ -33,6 +37,55 @@ struct State {
 };
 
 State _state;
+
+// Held for every frame's Tick. The process-exit hook takes it so it never shuts the session down while a frame is
+// using it, and no frame runs after the shutdown (_exiting).
+std::recursive_timed_mutex _tickMutex;
+std::atomic<bool> _exiting{false};
+
+using ExitProcessFn = void(WINAPI*)(UINT);
+using TerminateProcessFn = BOOL(WINAPI*)(HANDLE, UINT);
+ExitProcessFn _origExitProcess = nullptr;
+TerminateProcessFn _origTerminateProcess = nullptr;
+
+// The game is ending (its quit menu, the window's close button, a crash handler's exit, ...): leave the co-op
+// session cleanly so the others are told at once instead of after the 10 s timeout, and release our D3D objects.
+// A kill from outside (Task Manager, taskkill /F) cannot be caught; the others then time out.
+void OnProcessExit(const char* via) {
+    static std::atomic<bool> once{false};
+    if (once.exchange(true)) return;
+    MC_LOG_INFO("mod: process exit (%s): leaving co-op cleanly", via);
+    std::unique_lock<std::recursive_timed_mutex> lock(_tickMutex, std::defer_lock);
+    const bool locked = lock.try_lock_for(std::chrono::milliseconds(500));
+    _exiting = true;
+    Coop::Shutdown();
+    if (locked) render::Overlay::ReleaseAll();  // only without a frame drawing at the same time
+    MC_LOG_INFO("mod: exit handling done%s", locked ? "" : " (render thread busy: overlay left to the OS)");
+}
+
+void WINAPI ExitProcessDetour(UINT code) {
+    OnProcessExit("ExitProcess");
+    _origExitProcess(code);
+}
+
+BOOL WINAPI TerminateProcessDetour(HANDLE process, UINT code) {
+    if (process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId())
+        OnProcessExit("TerminateProcess");
+    return _origTerminateProcess(process, code);
+}
+
+void InstallExitHooks() {
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    void* exitProcess = k32 ? reinterpret_cast<void*>(GetProcAddress(k32, "ExitProcess")) : nullptr;
+    void* terminateProcess = k32 ? reinterpret_cast<void*>(GetProcAddress(k32, "TerminateProcess")) : nullptr;
+    const bool a = exitProcess && core::hook::Install("ExitProcess", exitProcess, reinterpret_cast<void*>(&ExitProcessDetour),
+                                                      reinterpret_cast<void**>(&_origExitProcess));
+    const bool b = terminateProcess &&
+                   core::hook::Install("TerminateProcess", terminateProcess,
+                                       reinterpret_cast<void*>(&TerminateProcessDetour),
+                                       reinterpret_cast<void**>(&_origTerminateProcess));
+    if (!a || !b) MC_LOG_WARN("mod: exit hooks incomplete (ExitProcess %d, TerminateProcess %d)", a, b);
+}
 
 // F7 toggles the debug status text; only while one of our windows is in the foreground.
 void PollToggleKey() {
@@ -65,10 +118,13 @@ void Mod::Init() {
                 _state.overlayVisible ? "shown" : "hidden");
     Coop::Init();
     CoopUi::Init();
+    InstallExitHooks();
     MC_LOG_INFO("mod: initialized");
 }
 
 void Mod::Tick(float dt) {
+    std::lock_guard<std::recursive_timed_mutex> lock(_tickMutex);
+    if (_exiting) return;
     if (_state.frames == 0) MC_LOG_INFO("mod: first Tick");
     ++_state.frames;
     ++_state.framesSinceHeartbeat;
@@ -117,6 +173,17 @@ void Mod::Tick(float dt) {
 }
 
 void Mod::OnBeforeResize() { render::Overlay::ReleaseTargets(); }
+
+void Mod::OnDeviceLost() { render::Overlay::ReleaseAll(); }
+
+bool Mod::DebugOverlay() { return _state.overlayVisible; }
+
+void Mod::SetDebugOverlay(bool on, bool save) {
+    _state.overlayVisible = on;
+    MC_LOG_INFO("mod: debug status text %s", on ? "shown" : "hidden");
+    if (save && !core::Config::Get().Set("debug_overlay", on ? "1" : "0"))
+        MC_LOG_WARN("mod: could not save debug_overlay");
+}
 
 void Mod::OnResize(unsigned width, unsigned height) {
     window_place::OnResize();

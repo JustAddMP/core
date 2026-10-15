@@ -36,6 +36,8 @@ public:
     bool IsMember(uint64_t steamId) const;
     std::vector<uint64_t> Members() const;
     std::string GetData(const char* key) const;
+    // Owner only, while in the lobby: lobby data friends see before joining (e.g. mc_state, mc_mode). False otherwise.
+    bool SetData(const char* key, const char* value);
     std::string PersonaName(uint64_t steamId = 0) const;  // 0 = local user
 
     // Events (all on the Poll() thread).

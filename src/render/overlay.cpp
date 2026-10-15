@@ -296,10 +296,6 @@ DXGI_FORMAT ViewFormat(DXGI_FORMAT f) {
 bool EnsureTarget(IDXGISwapChain* sc, ID3D11Device* dev) {
     ID3D11Texture2D* bb = nullptr;
     if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&bb))) || !bb) return false;
-    if (bb == _res.backbuffer && _res.rtv) {
-        bb->Release();
-        return true;
-    }
     _res.ReleaseTarget();
     D3D11_TEXTURE2D_DESC td{};
     bb->GetDesc(&td);
@@ -312,10 +308,11 @@ bool EnsureTarget(IDXGISwapChain* sc, ID3D11Device* dev) {
         Check(hr, "CreateRenderTargetView(backbuffer)");
         return false;
     }
-    _res.backbuffer = bb;  // keeps our reference until ReleaseTargets()
+    _res.backbuffer = bb;  // released again at the end of this frame's Draw
+    if (td.Width != _res.width || td.Height != _res.height)
+        MC_LOG_INFO("overlay: target %ux%u format %d", td.Width, td.Height, static_cast<int>(td.Format));
     _res.width = td.Width;
     _res.height = td.Height;
-    MC_LOG_INFO("overlay: target %ux%u format %d", td.Width, td.Height, static_cast<int>(td.Format));
     return true;
 }
 
@@ -372,6 +369,11 @@ float DrawList::TextWidth(const std::string& s, float px) {
 // ---- Overlay -------------------------------------------------------------------------------------------------------
 void Overlay::ReleaseTargets() { _res.ReleaseTarget(); }
 
+void Overlay::ReleaseAll() {
+    if (_res.device) MC_LOG_INFO("overlay: releasing all resources (device %p)", _res.device);
+    _res.ReleaseAll();
+}
+
 namespace {
 std::atomic<unsigned> _trackedW{0}, _trackedH{0};
 }
@@ -410,7 +412,10 @@ void Overlay::Draw(IDXGISwapChain* sc, const std::vector<OverlayLine>& lines, co
     ID3D11DeviceContext* ctx = nullptr;
     dev->GetImmediateContext(&ctx);
     dev->Release();  // our resources keep the device alive while we use it
-    if (!ctx) return;
+    if (!ctx) {
+        _res.ReleaseTarget();
+        return;
+    }
 
     // ---- build geometry: status panel, then the UI on top ----
     _frame.Clear();
@@ -434,6 +439,7 @@ void Overlay::Draw(IDXGISwapChain* sc, const std::vector<OverlayLine>& lines, co
     D3D11_MAPPED_SUBRESOURCE m{};
     if (FAILED(ctx->Map(_res.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
         ctx->Release();
+        _res.ReleaseTarget();
         return;
     }
     if (nOwn) memcpy(m.pData, own.data(), nOwn * sizeof(Vertex));
@@ -476,6 +482,9 @@ void Overlay::Draw(IDXGISwapChain* sc, const std::vector<OverlayLine>& lines, co
     saved->Restore(ctx);
     delete saved;
     ctx->Release();
+    // Hold no backbuffer reference between frames: the game may resize, recreate or release its swapchain at any
+    // time (and ResizeBuffers fails while a reference is held). A view per frame costs next to nothing.
+    _res.ReleaseTarget();
 
     if (!_loggedFirstDraw) {
         _loggedFirstDraw = true;

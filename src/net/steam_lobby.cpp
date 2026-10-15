@@ -153,6 +153,11 @@ bool SteamLobby::IsMember(uint64_t steamId) const {
     return false;
 }
 
+bool SteamLobby::SetData(const char* key, const char* value) {
+    if (!inited_ || state_ != State::InLobby || !IsOwner() || !api().MM_SetLobbyData) return false;
+    return api().MM_SetLobbyData(api().matchmaking, lobby_, key, value);
+}
+
 std::string SteamLobby::GetData(const char* key) const {
     if (!lobby_ || !inited_) return {};
     const char* v = api().MM_GetLobbyData(api().matchmaking, lobby_, key);

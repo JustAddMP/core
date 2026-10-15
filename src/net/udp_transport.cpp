@@ -57,6 +57,9 @@ enum PacketType : uint8_t {
     kDisconnect = 7,
     kRefuse = 8,
 };
+// A clean disconnect is unreliable (the connection is gone right after): send it several times so the other side
+// learns at once even on a lossy link instead of after the timeout.
+constexpr int kDisconnectCopies = 4;
 
 enum UnitKind : uint8_t {
     kUnreliable = 0,
@@ -762,8 +765,7 @@ struct UdpTransport::Impl {
         if (sock != INVALID_SOCKET) {
             for (auto& kv : peers)
                 if (kv.second.state == PeerState::Connected) {
-                    SendControl(kv.second, kDisconnect);
-                    SendControl(kv.second, kDisconnect);
+                    for (int i = 0; i < kDisconnectCopies; ++i) SendControl(kv.second, kDisconnect);
                 }
             // Push out delayed sim traffic now so the disconnect is not lost with the socket.
             for (auto& d : delayed) RawSend(d.to, d.bytes.data(), d.bytes.size());
@@ -904,8 +906,7 @@ void UdpTransport::Disconnect(PeerId id) {
     Peer* p = m.Find(id);
     if (!p) return;
     if (p->state == PeerState::Connected) {
-        m.SendControl(*p, kDisconnect);
-        m.SendControl(*p, kDisconnect);
+        for (int i = 0; i < kDisconnectCopies; ++i) m.SendControl(*p, kDisconnect);
     }
     m.RemovePeer(id);
     m.closedLocally.insert(id);

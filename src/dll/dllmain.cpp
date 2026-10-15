@@ -180,7 +180,7 @@ DWORD WINAPI InitThread(LPVOID) {
     ui_input::Install();
     if (cfg.GetBool("test_pad")) ui_input::EnableTestPad(true);  // tests: a virtual gamepad (dll/ui_input.h)
     Mod::Init();
-    if (!render::InstallPresentHook(&Mod::Tick, &Mod::OnResize, &Mod::OnBeforeResize)) {
+    if (!render::InstallPresentHook(&Mod::Tick, &Mod::OnResize, &Mod::OnBeforeResize, &Mod::OnDeviceLost)) {
         MC_LOG_ERROR("init: Present hook failed; mod inactive");
         return 1;
     }

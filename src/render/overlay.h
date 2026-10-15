@@ -45,8 +45,12 @@ public:
     // Draws the status lines (top-left panel; may be empty) and then `ui` (may be null). Creates its resources on
     // first use (and again if the game's device changes). Disables itself (logged once) if anything fails.
     static void Draw(IDXGISwapChain* swapChain, const std::vector<OverlayLine>& status, const DrawList* ui);
-    // Must run before IDXGISwapChain::ResizeBuffers: drops our reference to the backbuffer.
+    // Drops our backbuffer reference and its view. Draw already does this after every frame (no reference survives
+    // into the game's Present / ResizeBuffers / swapchain release); kept for ResizeBuffers as a safety net.
     static void ReleaseTargets();
+    // Releases everything (shaders, buffers, font texture, states): device lost, or the process is exiting. The next
+    // Draw creates them again if needed.
+    static void ReleaseAll();
     // Reads the backbuffer size from the swapchain (cheap; call once per frame before laying out UI).
     static void Track(IDXGISwapChain* swapChain);
     // Last tracked backbuffer size (0 before the first Track).

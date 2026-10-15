@@ -26,6 +26,8 @@ ResizeBuffersFn _origResizeBuffers = nullptr;
 FrameCallback _onFrame = nullptr;
 ResizeCallback _onResize = nullptr;
 BeforeResizeCallback _onBeforeResize = nullptr;
+DeviceLostCallback _onDeviceLost = nullptr;
+DWORD _presentThread = 0;  // thread of the first Present (the game's render thread)
 IDXGISwapChain* _swapChain = nullptr;
 LARGE_INTEGER _freq{};
 LARGE_INTEGER _last{};
@@ -48,7 +50,16 @@ void OnFrame(IDXGISwapChain* sc, const char* via) {
     _swapChain = sc;
     if (!_loggedFirstFrame) {
         _loggedFirstFrame = true;
+        _presentThread = GetCurrentThreadId();
         LogSwapChain(sc, via);
+        MC_LOG_INFO("render: Present runs on thread %lu", _presentThread);
+    } else if (GetCurrentThreadId() != _presentThread) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            MC_LOG_WARN("render: Present on thread %lu, first frame was on %lu (overlay assumes one render thread)",
+                        GetCurrentThreadId(), _presentThread);
+        }
     }
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -58,11 +69,21 @@ void OnFrame(IDXGISwapChain* sc, const char* via) {
     if (_onFrame) _onFrame(dt);
 }
 
+// The game's device is gone (driver reset, GPU removed): every resource made on it is useless. The game recreates
+// its device and swapchain; the overlay rebuilds on the next frame that has one.
+void CheckDeviceLost(HRESULT hr) {
+    if (hr != DXGI_ERROR_DEVICE_REMOVED && hr != DXGI_ERROR_DEVICE_RESET) return;
+    MC_LOG_WARN("render: Present returned 0x%08lx (device lost); releasing overlay resources",
+                static_cast<unsigned long>(hr));
+    if (_onDeviceLost) _onDeviceLost();
+}
+
 HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* sc, UINT syncInterval, UINT flags) {
     if (_depth == 0 && !(flags & DXGI_PRESENT_TEST)) OnFrame(sc, "Present");
     ++_depth;
     HRESULT hr = _origPresent(sc, syncInterval, flags);
     --_depth;
+    CheckDeviceLost(hr);
     return hr;
 }
 
@@ -72,13 +93,15 @@ HRESULT STDMETHODCALLTYPE Present1Detour(IDXGISwapChain1* sc, UINT syncInterval,
     ++_depth;
     HRESULT hr = _origPresent1(sc, syncInterval, flags, params);
     --_depth;
+    CheckDeviceLost(hr);
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE ResizeBuffersDetour(IDXGISwapChain* sc, UINT count, UINT width, UINT height,
                                               DXGI_FORMAT format, UINT flags) {
-    MC_LOG_INFO("render: ResizeBuffers(%p, count=%u, %ux%u, fmt=%d, flags=0x%x)", sc, count, width, height,
-                static_cast<int>(format), flags);
+    MC_LOG_INFO("render: ResizeBuffers(%p, count=%u, %ux%u, fmt=%d, flags=0x%x) on thread %lu%s", sc, count, width,
+                height, static_cast<int>(format), flags, GetCurrentThreadId(),
+                _presentThread && GetCurrentThreadId() != _presentThread ? " (not the Present thread)" : "");
     if (_onBeforeResize) _onBeforeResize();  // ResizeBuffers fails while anyone holds a backbuffer reference
     HRESULT hr = _origResizeBuffers(sc, count, width, height, format, flags);
     if (FAILED(hr)) MC_LOG_WARN("render: ResizeBuffers returned 0x%08lx", static_cast<unsigned long>(hr));
@@ -146,8 +169,10 @@ bool GetSwapChainVtable(void** out, size_t count) {
 
 } // namespace
 
-bool InstallPresentHook(FrameCallback onFrame, ResizeCallback onResize, BeforeResizeCallback onBeforeResize) {
+bool InstallPresentHook(FrameCallback onFrame, ResizeCallback onResize, BeforeResizeCallback onBeforeResize,
+                        DeviceLostCallback onDeviceLost) {
     _onBeforeResize = onBeforeResize;
+    _onDeviceLost = onDeviceLost;
     _onFrame = onFrame;
     _onResize = onResize;
     QueryPerformanceFrequency(&_freq);

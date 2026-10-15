@@ -3,7 +3,9 @@
 #include "core/compat.h"
 #include "core/log.h"
 #include "dll/coop.h"
+#include "dll/mod.h"
 #include "dll/ui_input.h"
+#include "core/config.h"
 #include "mc/game_module.h"
 
 #include <windows.h>
@@ -41,10 +43,16 @@ struct Toast {
 
 // PlayerMenu: what to do with the guest picked in the CO-OP panel's player list (host only); ConfirmKick: "Kick
 // <name>?" before it happens.
-enum class Panel { None, PauseCoop, JoinIp, Password, PlayerMenu, ConfirmKick };
+// Lobby: the pre-game lobby (players with character and ready state, mode, start); Settings: CO-OP SETTINGS (name,
+// debug overlay, the game's settings); Name: the text box for the player name.
+enum class Panel { None, PauseCoop, JoinIp, Password, PlayerMenu, ConfirmKick, Lobby, Settings, Name };
 enum class Action {
     None, Host, Invite, JoinFriend, JoinIp, Leave, Back, Connect, SetPassword, ClearPassword, SubmitPassword,
-    PickPlayer, Kick, KickBan, ConfirmKick, Option
+    PickPlayer, Kick, KickBan, ConfirmKick, Option,
+    // lobby
+    Ready, Mode, Start, JoinGame, OpenLobby,
+    // settings
+    OpenSettings, EditName, SubmitName, DebugOverlay, Setting
 };
 
 struct Item {
@@ -63,6 +71,8 @@ struct UiState {
     int selected = 0;
     std::string ipText;
     std::string pwText;         // Password panel (shown masked)
+    std::string nameText;       // Name panel
+    Panel returnTo = Panel::None;  // Settings / Name: the panel to go back to (Back), None = close
     bool pwForHost = false;     // Password panel: true = set the host's password, false = retry the refused join
     int targetId = -1;          // PlayerMenu / ConfirmKick: the guest picked in the player list
     std::string targetName;
@@ -119,12 +129,32 @@ void ShowCompatBanner() {
 
 // ---- panels -------------------------------------------------------------------------------------------------------
 // The panels with a text box (same input code and look; the password is shown masked).
-bool TextPanel(Panel p) { return p == Panel::JoinIp || p == Panel::Password; }
+bool TextPanel(Panel p) { return p == Panel::JoinIp || p == Panel::Password || p == Panel::Name; }
 std::string& TextBuf() {
     UiState& u = U();
-    return u.panel == Panel::Password ? u.pwText : u.ipText;
+    return u.panel == Panel::Password ? u.pwText : u.panel == Panel::Name ? u.nameText : u.ipText;
 }
-Action SubmitAction() { return U().panel == Panel::Password ? Action::SubmitPassword : Action::Connect; }
+Action SubmitAction() {
+    const Panel p = U().panel;
+    return p == Panel::Password ? Action::SubmitPassword : p == Panel::Name ? Action::SubmitName : Action::Connect;
+}
+
+std::string ModeName(int mode, bool withNote = false) {
+    std::vector<LobbyMode> modes;
+    GetGameModule().LobbyModes(modes);
+    if (mode < 0 || static_cast<size_t>(mode) >= modes.size()) return mode < 0 ? "-" : "MODE " + std::to_string(mode);
+    const LobbyMode& m = modes[static_cast<size_t>(mode)];
+    return withNote && !m.available && !m.note.empty() ? m.name + " (" + m.note + ")" : m.name;
+}
+
+bool Hosting() {
+    const Coop::Phase ph = U().info.phase;
+    return ph == Coop::Phase::Hosting || ph == Coop::Phase::Starting;
+}
+bool InSession() {
+    const Coop::Phase ph = U().info.phase;
+    return ph != Coop::Phase::Idle;
+}
 
 void PasswordItems() {
     UiState& u = U();
@@ -138,6 +168,8 @@ int FirstMenuItem() {  // first item that is not a player row
         if (u.items[i].player < 0) return static_cast<int>(i);
     return 0;
 }
+
+void RestoreSelection(Action selAction, int selPlayer, int selOption);
 
 void BuildPauseItems() {
     UiState& u = U();
@@ -185,7 +217,97 @@ void BuildPauseItems() {
         u.items.push_back({"LEAVE CO-OP", Action::Leave});
         break;
     }
+    u.items.push_back({"SETTINGS", Action::OpenSettings});
     u.items.push_back({"BACK", Action::Back});
+    RestoreSelection(selAction, selPlayer, selOption);
+}
+
+// The lobby: the guests (host: selectable for kick), the game's character rows, then READY (guest) or MODE and START
+// (host), JOIN GAME while the host is already playing, INVITE FRIENDS, SETTINGS, LEAVE, BACK. Rebuilt every frame.
+void BuildLobbyItems() {
+    UiState& u = U();
+    Action selAction = Action::None;
+    int selPlayer = -1, selOption = -1;
+    if (u.selected >= 0 && u.selected < static_cast<int>(u.items.size())) {
+        selAction = u.items[static_cast<size_t>(u.selected)].action;
+        selPlayer = u.items[static_cast<size_t>(u.selected)].player;
+        selOption = u.items[static_cast<size_t>(u.selected)].option;
+    }
+    u.items.clear();
+    const bool host = Hosting();
+    if (host)
+        for (const auto& p : u.info.players)
+            if (!p.host) {
+                Item it{p.name, Action::PickPlayer};
+                it.player = p.id;
+                u.items.push_back(it);
+            }
+    std::vector<PanelOption> options;
+    GetGameModule().PanelOptions(options);
+    for (size_t i = 0; i < options.size(); ++i) {
+        Item it{options[i].label, Action::Option};
+        it.option = static_cast<int>(i);
+        it.value = options[i].value;
+        u.items.push_back(it);
+    }
+    if (host) {
+        Item mode{"MODE", Action::Mode};
+        mode.value = ModeName(u.info.lobbyMode, true);
+        u.items.push_back(mode);
+        std::vector<LobbyMode> modes;
+        GetGameModule().LobbyModes(modes);
+        const bool avail = u.info.lobbyMode >= 0 && static_cast<size_t>(u.info.lobbyMode) < modes.size() &&
+                           modes[static_cast<size_t>(u.info.lobbyMode)].available;
+        u.items.push_back({!avail                ? "START (NOT AVAILABLE YET)"
+                           : u.info.allReady ? "START " + ModeName(u.info.lobbyMode)
+                                             : "START (WAITING FOR PLAYERS)",
+                           Action::Start});
+        u.items.push_back({"INVITE FRIENDS", Action::Invite});
+    } else if (u.info.phase == Coop::Phase::Connected) {
+        if (u.info.hostInGame) {
+            u.items.push_back({"JOIN GAME (" + ModeName(u.info.hostGameMode) + ")", Action::JoinGame});
+        } else {
+            Item ready{"READY", Action::Ready};
+            ready.value = u.info.ready ? "YES" : "NO";
+            u.items.push_back(ready);
+        }
+    }
+    u.items.push_back({"SETTINGS", Action::OpenSettings});
+    if (InSession()) u.items.push_back({host ? "STOP HOSTING" : "LEAVE CO-OP", Action::Leave});
+    u.items.push_back({"BACK", Action::Back});
+    RestoreSelection(selAction, selPlayer, selOption);
+}
+
+// CO-OP SETTINGS: NAME, DEBUG OVERLAY, then the game's rows, BACK.
+void BuildSettingsItems() {
+    UiState& u = U();
+    Action selAction = Action::None;
+    int selOption = -1;
+    if (u.selected >= 0 && u.selected < static_cast<int>(u.items.size())) {
+        selAction = u.items[static_cast<size_t>(u.selected)].action;
+        selOption = u.items[static_cast<size_t>(u.selected)].option;
+    }
+    u.items.clear();
+    Item name{"NAME", Action::EditName};
+    name.value = Coop::EffectiveName();
+    u.items.push_back(name);
+    Item dbg{"DEBUG OVERLAY", Action::DebugOverlay};
+    dbg.value = Mod::DebugOverlay() ? "ON" : "OFF";
+    u.items.push_back(dbg);
+    std::vector<PanelOption> options;
+    GetGameModule().SettingsOptions(options);
+    for (size_t i = 0; i < options.size(); ++i) {
+        Item it{options[i].label, Action::Setting};
+        it.option = static_cast<int>(i);
+        it.value = options[i].value;
+        u.items.push_back(it);
+    }
+    u.items.push_back({"BACK", Action::Back});
+    RestoreSelection(selAction, -1, selOption);
+}
+
+void RestoreSelection(Action selAction, int selPlayer, int selOption) {
+    UiState& u = U();
     for (size_t i = 0; i < u.items.size(); ++i)
         if (selAction != Action::None && u.items[i].action == selAction && u.items[i].player == selPlayer &&
             u.items[i].option == selOption) {
@@ -194,6 +316,12 @@ void BuildPauseItems() {
         }
     if (selAction == Action::PickPlayer) u.selected = FirstMenuItem();  // that player left
     u.selected = std::clamp(u.selected, 0, static_cast<int>(u.items.size()) - 1);
+}
+
+// A row that shows "< VALUE >" and steps with Left/Right.
+bool Stepper(const Item& it) {
+    return it.option >= 0 || it.action == Action::Mode || it.action == Action::Ready ||
+           it.action == Action::DebugOverlay || it.action == Action::EditName;
 }
 
 void Open(Panel p, bool pwForHost = false) {
@@ -206,6 +334,19 @@ void Open(Panel p, bool pwForHost = false) {
         u.items.clear();
         BuildPauseItems();
         u.selected = FirstMenuItem();  // start on the menu, not on a player row
+    }
+    if (p == Panel::Lobby) {
+        u.items.clear();
+        BuildLobbyItems();
+        u.selected = FirstMenuItem();
+    }
+    if (p == Panel::Settings) {
+        u.items.clear();
+        BuildSettingsItems();
+    }
+    if (p == Panel::Name) {
+        u.nameText = Coop::Name();
+        u.items = {{"SAVE", Action::SubmitName}, {"CANCEL", Action::Back}};
     }
     if (p == Panel::PlayerMenu)
         u.items = {{"KICK", Action::Kick}, {"KICK AND BAN", Action::KickBan}, {"CANCEL", Action::Back}};
@@ -224,6 +365,9 @@ void Open(Panel p, bool pwForHost = false) {
                                        : p == Panel::JoinIp     ? "join-by-ip"
                                        : p == Panel::Password   ? "password"
                                        : p == Panel::PlayerMenu ? "player"
+                                       : p == Panel::Lobby      ? "lobby"
+                                       : p == Panel::Settings   ? "settings"
+                                       : p == Panel::Name       ? "name"
                                                                 : "confirm-kick");
 }
 
@@ -231,9 +375,20 @@ void Close() {
     UiState& u = U();
     if (u.panel == Panel::None) return;
     u.panel = Panel::None;
+    u.returnTo = Panel::None;
     u.items.clear();
     ui_input::SetCapture(false);
     MC_LOG_INFO("ui: panel closed");
+}
+
+// Host: the next/previous mode in the game's list (unavailable ones are shown too, START says so).
+void StepMode(int delta) {
+    std::vector<LobbyMode> modes;
+    GetGameModule().LobbyModes(modes);
+    if (modes.empty()) return;
+    const int n = static_cast<int>(modes.size());
+    const int next = ((U().info.lobbyMode + delta) % n + n) % n;
+    Coop::SetLobbyMode(next);
 }
 
 void Run(Action a) {
@@ -244,7 +399,17 @@ void Run(Action a) {
     case Action::JoinFriend: Close(); Coop::OpenSteamFriends(); break;
     case Action::JoinIp: Open(Panel::JoinIp); break;
     case Action::Leave: Close(); Coop::Leave(); break;
-    case Action::Back: Close(); break;
+    case Action::Back: {
+        const Panel back = u.panel == Panel::Name ? Panel::Settings : u.panel == Panel::Settings ? u.returnTo
+                                                                                                 : Panel::None;
+        const Panel outer = u.returnTo;
+        Close();
+        if (back != Panel::None) {
+            Open(back);
+            if (back == Panel::Settings) u.returnTo = outer;
+        }
+        break;
+    }
     case Action::SetPassword: Open(Panel::Password, true); break;
     case Action::ClearPassword: Close(); Coop::SetPassword(""); break;
     case Action::SubmitPassword: {
@@ -299,18 +464,61 @@ void Run(Action a) {
         if (it.option >= 0) GetGameModule().PanelOptionStep(static_cast<size_t>(it.option), +1);
         break;
     }
+    case Action::Setting: {
+        const Item& it = u.items[static_cast<size_t>(u.selected)];
+        if (it.option >= 0) GetGameModule().SettingsOptionStep(static_cast<size_t>(it.option), +1);
+        break;
+    }
+    case Action::Ready: Coop::SetReady(!u.info.ready); break;
+    case Action::Mode: StepMode(+1); break;
+    case Action::Start:
+        if (Coop::StartGame()) Close();
+        break;
+    case Action::JoinGame:
+        if (Coop::JoinRunningGame()) Close();
+        break;
+    case Action::OpenLobby: Open(Panel::Lobby); break;
+    case Action::OpenSettings: {
+        const Panel from = u.panel;
+        Open(Panel::Settings);
+        u.returnTo = from == Panel::Settings ? Panel::None : from;
+        break;
+    }
+    case Action::EditName: {
+        const Panel outer = u.returnTo;
+        Open(Panel::Name);
+        u.returnTo = outer;
+        break;
+    }
+    case Action::SubmitName: {
+        std::string name = u.nameText;
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+        while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+        const Panel outer = u.returnTo;
+        Coop::SetName(name);  // "" = back to the Steam / Windows name
+        Close();
+        Open(Panel::Settings);
+        u.returnTo = outer;
+        break;
+    }
+    case Action::DebugOverlay: Mod::SetDebugOverlay(!Mod::DebugOverlay(), true); break;
     case Action::None: break;
     }
 }
 
-// Left/Right on a game option row: step it. False if the selected row is not an option.
+// Left/Right on a "< VALUE >" row: step it. False if the selected row is not one.
 bool StepOption(int delta) {
     UiState& u = U();
-    if (u.panel != Panel::PauseCoop || u.selected < 0 || u.selected >= static_cast<int>(u.items.size())) return false;
+    if (TextPanel(u.panel) || u.selected < 0 || u.selected >= static_cast<int>(u.items.size())) return false;
     const Item& it = u.items[static_cast<size_t>(u.selected)];
-    if (it.option < 0) return false;
-    GetGameModule().PanelOptionStep(static_cast<size_t>(it.option), delta);
-    return true;
+    switch (it.action) {
+    case Action::Option: GetGameModule().PanelOptionStep(static_cast<size_t>(it.option), delta); return true;
+    case Action::Setting: GetGameModule().SettingsOptionStep(static_cast<size_t>(it.option), delta); return true;
+    case Action::Mode: StepMode(delta); return true;
+    case Action::Ready: Coop::SetReady(!u.info.ready); return true;
+    case Action::DebugOverlay: Mod::SetDebugOverlay(!Mod::DebugOverlay(), true); return true;
+    default: return false;
+    }
 }
 
 void Move(int d) {
@@ -522,7 +730,7 @@ void DrawItems(render::DrawList& d, float x, float& y, float w, float s) {
             d.Rect(x, y + 3 * s, 2 * s, rowH - 6 * s, kGold);
         }
         d.Text(x + 16 * s, y + (rowH - px) * 0.5f, it.label, px, sel ? 0xFFFFFFFF : kTextDim);
-        if (it.option >= 0) {  // a game option: "<  VALUE  >" on the right
+        if (Stepper(it)) {  // "<  VALUE  >" on the right
             const float vpx = 26 * s, ty = y + (rowH - vpx) * 0.5f;
             const std::string v = Upper(it.value);
             const float vw = render::DrawList::TextWidth(v, vpx), aw = render::DrawList::TextWidth(">", vpx);
@@ -626,7 +834,7 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
     y += 30 * s;
     float hx = x + pad;
     const bool onOption = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
-                          u.items[static_cast<size_t>(u.selected)].option >= 0;
+                          Stepper(u.items[static_cast<size_t>(u.selected)]);
     if (onOption) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
     hx += Hint(d, hx, y, "Enter", onOption ? "Next" : "Select", 22 * s);
     Hint(d, hx, y, "Esc", "Back", 22 * s);
@@ -699,6 +907,127 @@ void DrawConfirmKick(render::DrawList& d, float W, float H, float s) {
                "Yes", "No");
 }
 
+// The lobby: like the CO-OP panel, with each player's character and ready state.
+void DrawLobby(render::DrawList& d, float W, float H, float s) {
+    UiState& u = U();
+    BuildLobbyItems();
+    const Coop::Info& info = u.info;
+    d.Rect(0, 0, W, H, kShade);
+    const float w = 760 * s, x = (W - w) * 0.5f, pad = 36 * s;
+    const float rows = static_cast<float>(info.players.size());
+    const auto menuItems =
+        std::count_if(u.items.begin(), u.items.end(), [](const Item& it) { return it.player < 0; });
+    const float h = 70 * s + 40 * s + 34 * s + (rows > 0 ? rows * 40 * s + 30 * s : 0) +
+                    static_cast<float>(menuItems) * 46 * s + 90 * s;
+    const float top = std::max(20 * s, (H - h) * 0.4f);
+    float y = top;
+    d.RectH(x, top, w, h, kPanelBg, 0xD8121110);
+    d.Rect(x, top, w, 2 * s, kGoldDim);
+    y += 22 * s;
+    const float titleW = d.Text(x + pad, y, "CO-OP LOBBY", 50 * s, kGold);
+    if (info.passwordSet) DrawLock(d, x + pad + titleW + 22 * s, y + 14 * s, 26 * s, kGold);
+    y += 62 * s;
+    std::string status;
+    switch (info.phase) {
+    case Coop::Phase::Idle: status = "NOT CONNECTED"; break;
+    case Coop::Phase::Starting: status = "STARTING..."; break;
+    case Coop::Phase::Hosting:
+        status = "HOSTING";
+        if (info.lobbyOpen) status += "  -  STEAM";
+        if (info.port) status += "  -  " + (info.localAddress.empty() ? std::string("UDP") : info.localAddress) +
+                                 (info.port == GetGameInfo().defaultPort ? std::string() : ":" + std::to_string(info.port));
+        break;
+    case Coop::Phase::Joining: status = "JOINING " + Upper(info.target) + "..."; break;
+    case Coop::Phase::Connected:
+        status = info.hostInGame ? Upper(info.target) + " IS PLAYING " + ModeName(info.hostGameMode)
+                                 : "WAITING FOR " + Upper(info.target) + " TO START";
+        break;
+    }
+    d.Text(x + pad, y, status, 22 * s, kTextDim);
+    y += 40 * s;
+    // column heads
+    const float colChar = x + w * 0.42f, colState = x + w - pad;
+    d.Text(x + pad + 4 * s, y, "PLAYER", 19 * s, kGoldDim);
+    d.Text(colChar, y, "CHARACTER", 19 * s, kGoldDim);
+    d.Text(colState - render::DrawList::TextWidth("STATUS", 19 * s), y, "STATUS", 19 * s, kGoldDim);
+    y += 34 * s;
+    if (!info.players.empty()) {
+        d.Rect(x + pad, y - 8 * s, w - pad * 2, 1 * s, 0x60D1AC62);
+        for (const auto& p : info.players) {
+            bool sel = false;
+            for (size_t i = 0; i < u.items.size(); ++i) {
+                Item& it = u.items[i];
+                if (it.player != p.id || p.host) continue;
+                it.x0 = x + pad - 16 * s;
+                it.x1 = x + w - pad;
+                it.y0 = y - 5 * s;
+                it.y1 = y + 35 * s;
+                sel = static_cast<int>(i) == u.selected;
+                if (sel) {
+                    d.RectH(it.x0, it.y0, it.x1 - it.x0, it.y1 - it.y0, 0x66B08A45, 0x00B08A45);
+                    d.Rect(it.x0, it.y0, 2 * s, it.y1 - it.y0, kGold);
+                }
+            }
+            std::string name = p.name + (p.you ? "  (YOU)" : "");
+            d.Text(x + pad + 4 * s, y, Upper(name), 25 * s, sel ? 0xFFFFFFFF : p.you ? kText : kTextDim);
+            if (!p.character.empty()) d.Text(colChar, y + 2 * s, Upper(p.character), 22 * s, kTextDim);
+            std::string st;
+            uint32_t col = kTextDim;
+            if (p.host) {
+                st = info.hostInGame ? "HOST - PLAYING" : "HOST";
+                col = kGold;
+            } else if (p.ready) {
+                st = "READY";
+                col = 0xFF8CCB7E;
+            } else {
+                st = "NOT READY";
+                col = kRed;
+            }
+            d.Text(colState - render::DrawList::TextWidth(st, 23 * s), y + 1 * s, st, 23 * s, col);
+            y += 40 * s;
+        }
+        d.Rect(x + pad, y + 4 * s, w - pad * 2, 1 * s, 0x60D1AC62);
+        y += 30 * s;
+    }
+    DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
+    y += 30 * s;
+    float hx = x + pad;
+    const bool onStep = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
+                        Stepper(u.items[static_cast<size_t>(u.selected)]);
+    if (onStep) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
+    hx += Hint(d, hx, y, "Enter", "Select", 22 * s);
+    Hint(d, hx, y, "Esc", "Back", 22 * s);
+}
+
+void DrawSettings(render::DrawList& d, float W, float H, float s) {
+    UiState& u = U();
+    BuildSettingsItems();
+    d.Rect(0, 0, W, H, kShade);
+    const float w = 680 * s, x = (W - w) * 0.5f, pad = 36 * s;
+    const float h = 70 * s + 40 * s + static_cast<float>(u.items.size()) * 46 * s + 90 * s;
+    const float top = std::max(20 * s, (H - h) * 0.35f);
+    d.RectH(x, top, w, h, kPanelBg, 0xD8121110);
+    d.Rect(x, top, w, 2 * s, kGoldDim);
+    float y = top + 22 * s;
+    d.Text(x + pad, y, "CO-OP SETTINGS", 50 * s, kGold);
+    y += 62 * s;
+    d.Text(x + pad, y, "SAVED IN " + Upper(std::string(GetGameInfo().modName)) + ".INI", 21 * s, kTextDim);
+    y += 40 * s;
+    DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
+    y += 30 * s;
+    float hx = x + pad;
+    const bool onStep = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
+                        Stepper(u.items[static_cast<size_t>(u.selected)]) &&
+                        u.items[static_cast<size_t>(u.selected)].action != Action::EditName;
+    if (onStep) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
+    hx += Hint(d, hx, y, "Enter", onStep ? "Change" : "Select", 22 * s);
+    Hint(d, hx, y, "Esc", "Back", 22 * s);
+}
+
+void DrawName(render::DrawList& d, float W, float H, float s, float dt) {
+    DrawTextBox(d, W, H, s, dt, "PLAYER NAME", "EMPTY = YOUR STEAM NAME", U().nameText, "Save");
+}
+
 void DrawJoinIp(render::DrawList& d, float W, float H, float s, float dt) {
     DrawTextBox(d, W, H, s, dt, "JOIN BY IP", "HOST ADDRESS (IP OR IP:PORT)", U().ipText, "Connect");
 }
@@ -748,9 +1077,12 @@ void CoopUi::Tick(float dt) {
         case MenuCommand::PausePanel: Open(Panel::PauseCoop); break;
         case MenuCommand::SetPassword: Open(Panel::Password, true); break;
         case MenuCommand::ClearPassword: Coop::SetPassword(""); break;
+        case MenuCommand::Lobby: Open(Panel::Lobby); break;
+        case MenuCommand::Settings: Open(Panel::Settings); break;
         }
     }
     if (Coop::PopPasswordPrompt()) Open(Panel::Password, false);  // a join was refused for its password
+    if (Coop::PopOpenLobby() && u.panel == Panel::None) Open(Panel::Lobby);  // joined at the main menu
 
     Coop::Notice n;
     while (Coop::PopNotice(&n)) AddToast(n.title, n.text, n.error);
@@ -766,7 +1098,11 @@ void CoopUi::Tick(float dt) {
     render::Overlay::BackbufferSize(&bw, &bh);
     if (!bw || !bh) return;
     const float W = static_cast<float>(bw), H = static_cast<float>(bh), s = H / 1080.0f;
+    game.DrawHud(u.list, W, H);  // the game's HUD geometry (name tags) under our panels and banners
     if (u.panel == Panel::PauseCoop) DrawPausePanel(u.list, W, H, s);
+    if (u.panel == Panel::Lobby) DrawLobby(u.list, W, H, s);
+    if (u.panel == Panel::Settings) DrawSettings(u.list, W, H, s);
+    if (u.panel == Panel::Name) DrawName(u.list, W, H, s, dt);
     if (u.panel == Panel::JoinIp) DrawJoinIp(u.list, W, H, s, dt);
     if (u.panel == Panel::Password) DrawPassword(u.list, W, H, s, dt);
     if (u.panel == Panel::PlayerMenu) DrawPlayerMenu(u.list, W, H, s);

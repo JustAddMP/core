@@ -9,9 +9,10 @@ namespace mc::render {
 using FrameCallback = void (*)(float dt);
 using ResizeCallback = void (*)(unsigned width, unsigned height);
 using BeforeResizeCallback = void (*)();  // release backbuffer references here
+using DeviceLostCallback = void (*)();    // Present reported DXGI_ERROR_DEVICE_REMOVED/RESET: drop every resource
 
 bool InstallPresentHook(FrameCallback onFrame, ResizeCallback onResize = nullptr,
-                        BeforeResizeCallback onBeforeResize = nullptr);
+                        BeforeResizeCallback onBeforeResize = nullptr, DeviceLostCallback onDeviceLost = nullptr);
 void RemovePresentHook();
 
 IDXGISwapChain* GameSwapChain();  // last swapchain seen in Present (not AddRef'd), nullptr before the first frame

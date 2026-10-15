@@ -26,6 +26,8 @@ enum class MenuCommand {
     PausePanel,    // pause menu > CO-OP (opens core's co-op panel)
     SetPassword,   // SET / CHANGE PASSWORD (opens core's text box)
     ClearPassword, // CLEAR PASSWORD
+    Lobby,         // LOBBY (opens core's lobby panel: players, characters, ready, mode, start)
+    Settings,      // SETTINGS (opens core's co-op settings panel)
 };
 
 enum class MenuMode { Idle, Hosting, Joining, Connected };
@@ -42,6 +44,13 @@ struct MenuState {
 struct PanelOption {
     std::string label;  // "CHARACTER"
     std::string value;  // "PAULIE"
+};
+
+// A game mode the lobby can start (index = position in GameModule::LobbyModes), e.g. "FREE RIDE".
+struct LobbyMode {
+    std::string name;
+    bool available = true;  // false: listed but cannot be started yet
+    std::string note;       // shown next to an unavailable mode, e.g. "NEXT VERSION"
 };
 
 class GameModule {
@@ -72,6 +81,29 @@ public:
     virtual void PanelOptions(std::vector<PanelOption>&) {}
     // The player stepped option `index` (from the last PanelOptions list) by delta (-1 or +1).
     virtual void PanelOptionStep(size_t /*index*/, int /*delta*/) {}
+
+    // ---- co-op settings panel (core 0.5) ----
+    // The game's own rows in the CO-OP SETTINGS panel (core adds NAME and DEBUG OVERLAY), e.g. SHOW NAME TAGS.
+    virtual void SettingsOptions(std::vector<PanelOption>&) {}
+    virtual void SettingsOptionStep(size_t /*index*/, int /*delta*/) {}
+
+    // ---- pre-game lobby (core 0.5; net/lobby.h) ----
+    // The modes the host can pick in the lobby, in a fixed order (the index travels on the wire).
+    virtual void LobbyModes(std::vector<LobbyMode>&) {}
+    // Load `mode` now (the host pressed START, or a late joiner follows the host's game). False = cannot right now
+    // (e.g. the player is not at the main menu); core tells the player.
+    virtual bool StartMode(int /*mode*/) { return false; }
+    // The local player is in a loaded world (not the main menu / a loading screen).
+    virtual bool InWorld() { return false; }
+    // The mode the local player is playing (index into LobbyModes), -1 = none / not one of them.
+    virtual int CurrentMode() { return -1; }
+    // What the lobby shows as a player's character ("" = nothing).
+    virtual std::string PlayerCharacter(net::PlayerId) { return {}; }
+
+    // ---- HUD (core 0.5) ----
+    // Every frame: game geometry drawn by core's overlay under its panels and banners (e.g. name tags over other
+    // players). w/h: backbuffer size in pixels.
+    virtual void DrawHud(render::DrawList&, float /*w*/, float /*h*/) {}
 };
 
 GameModule& GetGameModule();  // defined by the game repo (dll only)

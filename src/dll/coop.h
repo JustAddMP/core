@@ -29,7 +29,10 @@ class Coop {
 public:
     static void Init();
     static void Tick(float dt);
-    static void Shutdown();  // leave the session cleanly (process exit)
+    // Leave the session cleanly at process exit: the others are told at once (host: "host left"; guest: "left the
+    // game") instead of timing out. Any thread; the caller makes sure no Tick runs at the same time (Mod does).
+    // Idempotent.
+    static void Shutdown();
     // Lines for the on-screen status panel (empty = draw nothing).
     static void GetStatus(std::vector<render::OverlayLine>& out);
 
@@ -53,6 +56,21 @@ public:
     static std::vector<std::string> BanList();
     static bool Unban(size_t index);
 
+    // ---- pre-game lobby (net/lobby.h; render thread) ----
+    static void SetReady(bool ready);    // guest
+    static void SetLobbyMode(int mode);  // host
+    // Host: START for everyone (force = even if a guest is not ready). False when not hosting / not all ready / the
+    // mode is unavailable.
+    static bool StartGame(bool force = false);
+    // Guest: load the mode the host is playing (late join). False when the host is not in a game.
+    static bool JoinRunningGame();
+    // True once after we joined a host while not in the world: the UI opens the lobby.
+    static bool PopOpenLobby();
+
+    // ---- settings ----
+    static std::string Name();  // the configured player name ("" = Steam persona / Windows user)
+    static std::string EffectiveName();
+    static void SetName(const std::string& name);  // saved; used from the next session
     enum class Phase { Idle, Starting, Hosting, Joining, Connected };
     struct PlayerRow {
         uint8_t id = 0;  // net::PlayerId (0 = host)
@@ -60,6 +78,8 @@ public:
         int pingMs = -1;  // -1 = none (the host's own row)
         int health = -1;  // 0..100, -1 = unknown (not in the world yet)
         bool host = false, you = false;
+        bool ready = false;     // lobby: this guest is ready
+        std::string character;  // GameModule::PlayerCharacter
     };
     struct Info {
         Phase phase = Phase::Idle;
@@ -71,6 +91,12 @@ public:
         std::string localAddress;  // this PC's LAN IPv4 (for "join by IP")
         std::string lastAddress;   // last address passed to JoinAddress (prefill for the input box)
         bool passwordSet = false;  // a host password is set (hosting needs it from guests)
+        // lobby (while a session is active)
+        int lobbyMode = 0;         // the host's picked mode
+        bool hostInGame = false;   // the host is playing
+        int hostGameMode = -1;     // ... this mode
+        bool allReady = true;      // every guest is ready
+        bool ready = false;        // we are ready (guest)
     };
     static Info GetInfo();
 
