@@ -3,6 +3,24 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.6.0 — 2026-10-16
+
+Traffic statistics and higher bandwidth limits (new features, so a minor release). No breaking changes: game repos
+update without code changes; the new interface call is optional. No wire protocol change.
+
+- Traffic statistics (docs/protocol.md "Traffic statistics"): `Session::Traffic()` counts messages and bytes per app
+  message id (sent per destination, received, relayed, refused sends); `PeerStats::reliableQueued` (UDP) is the
+  reliable backlog; `net::NetMonitor` turns them, the transport stats and the rate-limit drops into rates. The dll
+  logs a report every `net_log_interval` s (default 5) and shows the last second in the debug status text (F7).
+  Optional `GameModule::MessageName(id)` names the game's messages there.
+- Higher limits: the host's relay limit per guest is 1 MB/s with a 2 MB burst (was 64 KB/s, 128 KB), set from
+  `net_budget_kbps` (KiB/s, default 1024); `Coop::NetBudgetBytesPerS()` hands games the same number. The interest
+  manager's default budget is 512 KB/s per peer with a 0.25 s burst (was 64 KB/s, 0.1 s).
+- Tests: `net_loopback` "throughput" (a guest streaming ~450 KB/s through the host, unreliable states at 60 Hz plus a
+  47 KB reliable message twice a second: nothing dropped by the relay limit, every reliable message delivered,
+  counters and monitor agree); the rate-limit test pins the old small limits; `net_interest` "default budget" (a busy
+  co-op scene, ~175 KB/s for one peer, nothing deferred).
+
 ## v0.5.0 — 2026-10-15
 
 Pre-game lobby, co-op settings panel, HUD drawing for games, clean exit (new features, so a minor release). No

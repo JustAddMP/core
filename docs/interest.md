@@ -70,8 +70,8 @@ Everything in `SendList(peer)` is assumed sent at `now`: the caller must send al
 | Vehicle | 300 / 350 m | Normal | 80 m | 0.05 -> 0.4 s | < 0.3 m/s, x4 (parked) |
 | Object | 150 / 180 m | Low | 30 m | 0.1 -> 1.0 s | < 0.1 m/s, x2 |
 
-Global: `cellSize` 64 m, `bytesPerSecond` 64 KB/s per peer (`SetPeerBudget` overrides it per peer), `burstSeconds`
-0.1, `perMessageOverhead` 0, `priorityWeight` High 4 / Normal 2 / Low 1, `maxInterval` 2 s. Every `KindConfig` field
+Global: `cellSize` 64 m, `bytesPerSecond` 512 KB/s per peer (core 0.6; was 64 KB/s) (`SetPeerBudget` overrides it per peer), `burstSeconds`
+0.25, `perMessageOverhead` 0, `priorityWeight` High 4 / Normal 2 / Low 1, `maxInterval` 2 s. Every `KindConfig` field
 can be overridden; the constructor repairs nonsense (leave < enter, negative intervals).
 
 ## API

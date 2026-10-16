@@ -137,12 +137,35 @@ The host keeps two token buckets per guest (`SessionConfig`, a rate <= 0 turns o
 | Limit | Default | Applies to |
 |---|---|---|
 | `chatPerS` / `chatBurst` | 5 messages/s, burst 10 | Chat from a guest |
-| `relayBytesPerS` / `relayBurstBytes` | 64 KB/s, burst 128 KB (payload bytes) | App messages the host relays (target another guest or 0xFF) |
+| `relayBytesPerS` / `relayBurstBytes` | 1 MB/s, burst 2 MB (payload bytes; core 0.6, was 64 KB/s and 128 KB) | App messages the host relays (target another guest or 0xFF) |
 
 A message over its limit is dropped whole (the host neither handles nor relays it, so host and guests stay
 consistent; reliable ones too) and counted in `Session::RateLimits()`; the host logs the drops per guest at most once
 per second. A message larger than the burst still passes when the bucket is full and then has to refill. App
 messages to the host only (`SendToHost`) are not limited. Nothing changes on the wire.
+
+The dll sets the relay limit from the per-peer bandwidth setting `net_budget_kbps` (ini or `--net_budget_kbps`, KiB/s,
+default 1024, at least 64; burst twice that). Games use the same number for their interest manager
+(`Coop::NetBudgetBytesPerS()`, `interest::Config::bytesPerSecond`, default 512 KiB/s).
+
+### Traffic statistics
+
+Measuring what a session really sends (core 0.6):
+
+- `Session::Traffic()`: per app message id, messages and bytes sent (one count per destination peer; session header +
+  payload), received from the network, relayed by the host, and sends the transport refused (`MsgTraffic`).
+- `PeerStats::reliableQueued` (UDP): reliable units (<= 1100 bytes each) not yet acknowledged: the reliable backlog.
+- `net::NetMonitor` (src/net/net_monitor.h) turns both, plus `PeerStats` (rtt, loss, bytes, packets, resends) and
+  `RateLimits()`, into rates over an interval. The dll logs a report every `net_log_interval` seconds (default 5,
+  0 = off) while another player is in the session, and the debug status text (F7) shows the last second:
+
+```
+net: Guest (1): rtt 7 ms, loss 0.0 %, out 15.4 KB/s (76 pkt/s), in 4.4 KB/s (66 pkt/s), resends +0, reliable queued 0
+net: messages: NpcStates out 10.76 KB/s 29/s, in 0.00 KB/s 0/s; PlayerState out 3.53 KB/s 60/s, in 3.53 KB/s 60/s; ...
+net: DROPPED: relay rate limit +3 messages, chat +0, refused sends +0      (only when something was dropped)
+```
+
+  Message names come from `GameModule::MessageName(id)` (hex without one).
 
 App id allocation (u16, varint-encoded):
 
