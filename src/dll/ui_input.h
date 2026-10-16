@@ -26,6 +26,9 @@ struct Event {
     float x, y;     // mouse events: client coordinates scaled to the backbuffer
 };
 bool PopEvent(Event* out);  // render thread
+// Tests (dll/test_input.h): queue an event as if it came from the window; mouse coordinates in backbuffer pixels.
+// Dropped unless a panel captures input, like the window's own events. Any thread.
+void InjectEvent(const Event& e);
 
 // First gamepad (XInput user 0), buttons as XINPUT_GAMEPAD_* bits (left stick up/down reported as d-pad); 0 if
 // none. Render thread.

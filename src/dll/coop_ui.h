@@ -9,6 +9,8 @@
 //   - notifications ("Guest joined the game", "Connected to ...", errors) as banners at the top of the screen.
 #include "render/overlay.h"
 
+#include <string>
+
 namespace mc {
 
 class CoopUi {
@@ -18,6 +20,9 @@ public:
     // Geometry for this frame; nullptr when there is nothing to draw.
     static const render::DrawList* Draw();
     static bool PanelOpen();
+    // Tests (dll/test_input.h): the open panel, its rows with their hit boxes (backbuffer pixels) and the selected
+    // row, as log lines. Render thread.
+    static std::string Describe();
 };
 
 } // namespace mc

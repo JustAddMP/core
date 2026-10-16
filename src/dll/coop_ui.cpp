@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -1046,6 +1048,24 @@ void DrawPassword(render::DrawList& d, float W, float H, float s, float dt) {
 void CoopUi::Init() {}
 
 bool CoopUi::PanelOpen() { return U().panel != Panel::None; }
+
+std::string CoopUi::Describe() {
+    static const char* const kNames[] = {"none",        "pause CO-OP", "join by IP", "password", "player menu",
+                                         "confirm kick", "lobby",       "settings",   "name"};
+    const UiState& u = U();
+    const auto pi = static_cast<size_t>(u.panel);
+    std::string out = std::string("panel ") + (pi < std::size(kNames) ? kNames[pi] : "?") + ", selected " +
+                      std::to_string(u.selected);
+    char buf[256];
+    for (size_t i = 0; i < u.items.size(); ++i) {
+        const Item& it = u.items[i];
+        std::snprintf(buf, sizeof buf, "\n  [%zu]%s %s%s%s  (%.0f,%.0f)-(%.0f,%.0f)", i,
+                      static_cast<int>(i) == u.selected ? "*" : " ", it.label.c_str(), it.value.empty() ? "" : " = ",
+                      it.value.c_str(), it.x0, it.y0, it.x1, it.y1);
+        out += buf;
+    }
+    return out;
+}
 
 void CoopUi::Tick(float dt) {
     UiState& u = U();

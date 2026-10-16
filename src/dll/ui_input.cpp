@@ -321,6 +321,16 @@ bool OnWindowMessage(unsigned msg, uint64_t wp, int64_t lp) {
     }
 }
 
+void InjectEvent(const Event& e) {
+    if (!_capture.load()) return;
+    unsigned bw = 0, bh = 0;
+    render::Overlay::BackbufferSize(&bw, &bh);
+    std::lock_guard lock(_mutex);
+    if (_events.size() > 256) _events.pop_front();
+    // client size = backbuffer size: PopEvent scales by 1
+    _events.push_back({e, static_cast<float>(bw), static_cast<float>(bh)});
+}
+
 bool PopEvent(Event* out) {
     RawEvent r;
     {

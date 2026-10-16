@@ -6,6 +6,7 @@
 #include "core/log.h"
 #include "dll/coop.h"
 #include "dll/coop_ui.h"
+#include "dll/test_input.h"
 #include "dll/window_place.h"
 #include "mc/game_module.h"
 #include "render/overlay.h"
@@ -157,6 +158,7 @@ void Mod::Tick(float dt) {
     GetGameModule().RenderTick(dt);
     Coop::Tick(dt);
     render::Overlay::Track(render::GameSwapChain());
+    TestInput::Tick(dt);  // before the panels read their input
     CoopUi::Tick(dt);
 
     PollToggleKey();

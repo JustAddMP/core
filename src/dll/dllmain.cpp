@@ -8,6 +8,7 @@
 #include "core/mem.h"
 #include "core/names.h"
 #include "dll/mod.h"
+#include "dll/test_input.h"
 #include "dll/ui_input.h"
 #include "dll/window_place.h"
 #include "mc/game_module.h"
@@ -179,6 +180,7 @@ DWORD WINAPI InitThread(LPVOID) {
     window_place::Init(hwnd);
     ui_input::Install();
     if (cfg.GetBool("test_pad")) ui_input::EnableTestPad(true);  // tests: a virtual gamepad (dll/ui_input.h)
+    TestInput::Init(dir, cfg.GetString("log"));                 // tests: scripted pad/mouse input (dll/test_input.h)
     Mod::Init();
     if (!render::InstallPresentHook(&Mod::Tick, &Mod::OnResize, &Mod::OnBeforeResize, &Mod::OnDeviceLost)) {
         MC_LOG_ERROR("init: Present hook failed; mod inactive");
