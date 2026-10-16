@@ -206,7 +206,8 @@ Disconnect packet sent 4 times; Steam: a reliable Disconnect): a guest sees "hos
 10 s timeout. The dll also leaves cleanly when the game process ends normally: `ExitProcess` and
 `TerminateProcess(self)` are hooked (dll/mod.cpp) and call `Coop::Shutdown()` first (verified in Mafia DE: closing the
 window ends the process through ExitProcess; the others were told 3 ms later). A process killed from outside (Task
-Manager, `taskkill /F`) cannot say goodbye; the others then time out after 10 s.
+Manager, `taskkill /F`) cannot say goodbye; the others then time out after `net_timeout_s` (default 4 s over UDP,
+`net_steam_timeout_s` 6 s over Steam; 10 s before core v0.8.0).
 
 ## UDP transport
 
@@ -227,6 +228,7 @@ same address are ignored).
 | 6 | PONG | echoed id, ms |
 | 7 | DISCONNECT | - (sent twice) |
 | 8 | REFUSE | u8 reason (1 not hosting, 2 full) |
+| 9 | ALIVE | - (keepalive thread, below) |
 
 Handshake (stateless anti-spoof): client sends CONNECT(cookie 0) every 250 ms. The host answers with
 CHALLENGE(cookie = SipHash-2-4(secret, ip, port, nonce, 5-second time bucket)) without allocating anything; the
@@ -239,8 +241,13 @@ session handshake (DISCONNECT to it, `Disconnected(Refused)` locally; the sessio
 the new connection gets REFUSE(full). Any DATA/PING from the host also completes the
 client's handshake if ACCEPT was lost. The client gives up after 10 s (`ConnectFailed`).
 
-Keepalive: PING every 0.5 s; a peer is dropped after 10 s without any packet (`Timeout`). PING/PONG gives the RTT
-and the loss estimate (fraction of settled pings without a pong, last 64).
+Keepalive: PING every 0.5 s; a peer is dropped after `UdpOptions::timeoutS` without any packet (`Timeout`; 10 s by
+default, the dll sets `net_timeout_s`, default 4 s). PING/PONG gives the RTT and the loss estimate (fraction of
+settled pings without a pong, last 64). PINGs are sent from `Poll()`; when `Poll()` has not run for
+2 x `keepaliveThreadS` (0.25 s) the transport's keepalive thread sends ALIVE (type 9, no body) to every connected
+peer every 0.25 s, which only refreshes the receiver's timeout, until `Poll()` runs again or the stall passes
+`keepaliveMaxStallS` (60 s; then the peers time out as if the process were gone). So a game that is busy (a long
+load stalling the thread that polls) is not dropped, and a killed one is noticed after the timeout.
 
 DATA ack section: `u16 cumulative` (next reliable seq expected; everything before it was received), `u8 n` (0..8),
 `n x u32` selective bits: bit k of word w = seq `cumulative + 1 + 32w + k` is buffered. Every DATA carries it; an
@@ -303,8 +310,8 @@ All our traffic uses P2P channel 7. Packet = `u8 0x4D` ('M'), `u8 ctrl`, body:
 | 7 | DISCONNECT | reliable | - |
 | 8 | REFUSE | reliable | - |
 
-Connected/Disconnected events come from this control layer (CONNECT/ACCEPT, DISCONNECT, 10 s keepalive timeout,
-20 s connect timeout) plus `P2PSessionConnectFail_t`.
+Connected/Disconnected events come from this control layer (CONNECT/ACCEPT, DISCONNECT, keepalive timeout:
+`SteamOptions::timeoutS`, the dll's `net_steam_timeout_s`, default 6 s with PINGs every 0.5 s; 20 s connect timeout) plus `P2PSessionConnectFail_t`.
 
 **Accepting sessions.** `P2PSessionRequest_t` (id 1202) arrives when an unknown user sends to us. The host accepts
 only if the accept filter allows the SteamID; the dll sets it to "is a member of our lobby". A request that is not

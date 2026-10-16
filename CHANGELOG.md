@@ -3,6 +3,27 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.8.0 — 2026-10-16
+
+Faster detection of a game that was killed, without dropping a player whose game is only busy; a key press for the
+game. New features, so a minor release. No breaking changes; the wire protocol version stays 7 (the new UDP packet
+type is ignored by older peers, which only refresh their timeout on it).
+
+- UDP keepalive thread (`UdpOptions::keepaliveThreadS`, default 0.25 s): when `Poll()` has not run for twice that
+  long (the thread that polls is stalled, e.g. a game loading a world), a thread of the transport sends an ALIVE
+  packet (type 9, header only) to every connected peer, so a short timeout does not drop a busy player. It gives up
+  after `keepaliveMaxStallS` (60 s) of stall: a hung process is dropped like a killed one. `KeepalivesSent()`.
+- The dll's timeouts are settings: `net_timeout_s` (UDP, default **4 s**, was 10 s) and `net_steam_timeout_s`
+  (Steam P2P, default 6 s, pings every 0.5 s; the Steam transport has no keepalive thread), both 2..60. A killed game
+  is now noticed after about 4.5 s over UDP. Measured in Mafia DE: the frame (and so `Poll()`) never stalled more than
+  0.2 s, also during loading screens.
+- `ui_input::PressGameKey(dik, holdMs)`: a key press the game itself sees (the keyboard's DirectInput state and
+  buffered events), for prompts like a loading screen's "Enter: continue". Ignored while one of our panels captures
+  input; a game reads DirectInput only while its window has focus.
+- Tests: `net_loopback` "keepalive thread covers a stall" (5 s without `Poll()`, host timeout 2 s: still connected),
+  "hung guest dropped after the stall cover" (1.5 s cover + 2 s timeout: dropped after ~3.3 s); the 10 s timeout
+  test runs with the keepalive thread off (a killed process).
+
 ## v0.7.0 — 2026-10-16
 
 Test input for the co-op panels (a new feature for tests, so a minor release). No breaking changes, no wire protocol
