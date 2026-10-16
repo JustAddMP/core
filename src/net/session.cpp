@@ -109,6 +109,7 @@ void Session::Reset() {
     pending_.clear();
     limits_.clear();
     rateStats_ = {};
+    traffic_.clear();
     rateLogPending_ = false;
     localId_ = kNoPlayer;
     hostPeer_ = kInvalidPeer;
@@ -621,15 +622,28 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
                 CountDropped(*from, false, payload.size());
                 return;
             }
+            {
+                MsgTraffic& t = traffic_[id];
+                ++t.recvMsgs;
+                t.recvBytes += r.Position();
+            }
             if (target == kHostPlayer || target == kAllPlayers) DispatchApp(id, fid, payload);
             if (target != kHostPlayer) {
                 ByteWriter w = AppHeader(id, fid, target, rel);
                 w.Bytes(payload);
+                int copies = 0, failed = 0;
                 if (target == kAllPlayers) {
                     BroadcastRaw(w, rel, fid);
+                    copies = lastCopies_;
+                    failed = lastFailed_;
                 } else if (PlayerInfo* to = FindMutable(target); to && to->id != kHostPlayer && to->id != fid) {
-                    SendRaw(to->peer, w, rel);
+                    copies = 1;
+                    failed = SendRaw(to->peer, w, rel) ? 0 : 1;
                 }
+                MsgTraffic& t = traffic_[id];
+                t.relayedMsgs += static_cast<uint64_t>(copies - failed);
+                t.relayedBytes += static_cast<uint64_t>(copies - failed) * w.Size();
+                t.sendFailed += static_cast<uint64_t>(failed);
             }
             break;
         }
@@ -822,7 +836,12 @@ void Session::GuestOnMessage(ByteReader& r) {
             r.U8();  // target
             r.U8();  // flags
             auto payload = r.Rest();
-            if (r.Ok()) DispatchApp(id, from, payload);
+            if (r.Ok()) {
+                MsgTraffic& t = traffic_[id];
+                ++t.recvMsgs;
+                t.recvBytes += r.Position();
+                DispatchApp(id, from, payload);
+            }
             break;
         }
         default:
@@ -861,15 +880,23 @@ bool Session::SendToHost(uint16_t msgId, std::span<const uint8_t> payload, Relia
     if (state_ != SessionState::Connected) return false;
     ByteWriter w = AppHeader(msgId, localId_, kHostPlayer, rel);
     w.Bytes(payload);
-    return SendRaw(hostPeer_, w, rel);
+    const bool ok = SendRaw(hostPeer_, w, rel);
+    CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
+    return ok;
 }
 
 bool Session::Broadcast(uint16_t msgId, std::span<const uint8_t> payload, Reliability rel) {
     if (!IsActive()) return false;
     ByteWriter w = AppHeader(msgId, localId_, kAllPlayers, rel);
     w.Bytes(payload);
-    if (state_ == SessionState::Hosting) return BroadcastRaw(w, rel, kHostPlayer);
-    return SendRaw(hostPeer_, w, rel);
+    if (state_ == SessionState::Hosting) {
+        const bool ok = BroadcastRaw(w, rel, kHostPlayer);
+        CountSent(msgId, w.Size(), lastCopies_, lastFailed_);
+        return ok;
+    }
+    const bool ok = SendRaw(hostPeer_, w, rel);
+    CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
+    return ok;
 }
 
 bool Session::SendTo(PlayerId player, uint16_t msgId, std::span<const uint8_t> payload, Reliability rel) {
@@ -880,11 +907,23 @@ bool Session::SendTo(PlayerId player, uint16_t msgId, std::span<const uint8_t> p
     }
     ByteWriter w = AppHeader(msgId, localId_, player, rel);
     w.Bytes(payload);
+    bool ok;
     if (state_ == SessionState::Hosting) {
         PlayerInfo* p = FindMutable(player);
-        return p && SendRaw(p->peer, w, rel);
+        ok = p && SendRaw(p->peer, w, rel);
+    } else {
+        ok = SendRaw(hostPeer_, w, rel);  // host delivers (player 0) or relays
     }
-    return SendRaw(hostPeer_, w, rel);  // host delivers (player 0) or relays
+    CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
+    return ok;
+}
+
+void Session::CountSent(uint16_t id, size_t bytes, int copies, int failed) {
+    MsgTraffic& t = traffic_[id];
+    const auto okCopies = static_cast<uint64_t>(std::max(0, copies - failed));
+    t.sentMsgs += okCopies;
+    t.sentBytes += okCopies * bytes;
+    t.sendFailed += static_cast<uint64_t>(std::max(0, failed));
 }
 
 bool Session::SendChat(std::string_view text) {
@@ -907,11 +946,16 @@ bool Session::SendRaw(PeerId peer, const ByteWriter& w, Reliability rel) {
 }
 
 bool Session::BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except) {
+    lastCopies_ = lastFailed_ = 0;
     size_t limit = rel == Reliability::Reliable ? kMaxReliableMessage : kMaxUnreliableMessage;
-    if (w.Size() > limit) return false;
     bool ok = true;
-    for (auto& p : players_)
-        if (p.id != kHostPlayer && p.id != except) ok &= SendRaw(p.peer, w, rel);
+    for (auto& p : players_) {
+        if (p.id == kHostPlayer || p.id == except) continue;
+        ++lastCopies_;
+        const bool sent = w.Size() <= limit && SendRaw(p.peer, w, rel);
+        if (!sent) ++lastFailed_;
+        ok &= sent;
+    }
     return ok;
 }
 

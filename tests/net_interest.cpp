@@ -169,7 +169,9 @@ void TestAlwaysRelevant() {
 
 // ---- 3. budget cap and fairness under saturation ----
 void TestBudget() {
-    Config cfg;  // 64 KB/s
+    Config cfg;
+    cfg.bytesPerSecond = 64 * 1024;  // the old default: small enough to saturate with 2000 entities
+    cfg.burstSeconds = 0.1;
     InterestManager m(cfg);
     m.AddPeer(1);
     m.SetPeerViewpoint(1, {0, 0, 0});
@@ -486,8 +488,60 @@ void TestScaleAndDeterminism() {
 
 }  // namespace
 
+// ---- 3b. the default budget carries a busy co-op scene without deferring anything ----
+// 4 players and their cars (Critical, 20 Hz, 160 B), 48 NPCs within 50 m (20 Hz) and 150 more up to 120 m, 40 moving
+// cars nearby: about 300 KB/s for one peer. With the old 64 KB/s default most of it was deferred.
+void TestDefaultBudget() {
+    Config cfg;
+    InterestManager m(cfg);
+    m.AddPeer(1);
+    m.SetPeerViewpoint(1, {0, 0, 0});
+    EntityId id = 1;
+    for (int i = 0; i < 4; ++i) {
+        EntityDesc p = Npc(id++, {static_cast<float>(i * 5), 0, 0}, 2 + i, Kind::Player);
+        p.sizeBytes = 160;
+        m.AddEntity(p);
+        EntityDesc c = Npc(id++, {static_cast<float>(i * 5), 3, 0}, 2 + i, Kind::PlayerCar);
+        c.sizeBytes = 160;
+        m.AddEntity(c);
+    }
+    Rng rng(11);
+    for (int i = 0; i < 198; ++i) {
+        float r = i < 48 ? 45.0f * std::sqrt(rng.Uniform(0, 1)) : 50 + 70 * rng.Uniform(0, 1);
+        float a = rng.Uniform(0, 6.2831853f);
+        EntityDesc d = Npc(id++, {r * std::cos(a), r * std::sin(a), 0});
+        d.sizeBytes = 40;
+        d.hasVelocity = true;
+        d.vel = {2, 0, 0};
+        m.AddEntity(d);
+    }
+    for (int i = 0; i < 40; ++i) {
+        float r = 20 + 60 * rng.Uniform(0, 1), a = rng.Uniform(0, 6.2831853f);
+        EntityDesc d = Npc(id++, {r * std::cos(a), r * std::sin(a), 0}, 0, Kind::Vehicle);
+        d.sizeBytes = 60;
+        d.hasVelocity = true;
+        d.vel = {12, 0, 0};
+        m.AddEntity(d);
+    }
+    uint64_t deferred = 0, bytes = 0;
+    const double dt = 0.05;
+    const int ticks = 200;
+    for (int k = 0; k < ticks; ++k) {
+        m.Tick(k * dt);
+        const PeerStats* st = m.Stats(1);
+        if (k > 0) deferred += st->deferred;  // the first tick sends everything at once (Enter)
+        bytes += st->bytes;
+    }
+    const double rate = static_cast<double>(bytes) / ((ticks - 1) * dt);
+    Check(cfg.bytesPerSecond >= 512 * 1024 && deferred == 0 && rate > 64 * 1024,
+          "default budget: busy scene, nothing deferred",
+          Fmt("%.0f KB/s used of %.0f, deferred %.0f", rate / 1024, cfg.bytesPerSecond / 1024.0,
+              static_cast<double>(deferred)));
+}
+
 int main() {
     TestHysteresis();
+    TestDefaultBudget();
     TestAlwaysRelevant();
     TestBudget();
     TestRates();

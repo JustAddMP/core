@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "net/net_monitor.h"
 #include "net/session.h"
 #include "net/udp_transport.h"
 #include "net/wire.h"
@@ -138,7 +139,10 @@ void TestWire() {
 
 // ---- host relay rate limits: a flooding guest is throttled, the other guest's traffic still flows ----
 void TestRateLimits() {
-    Node host("Host", BaseConfig());
+    SessionConfig limited = BaseConfig();  // the pre-0.6 limits, small enough to flood in a test
+    limited.relayBytesPerS = 64.0 * 1024;
+    limited.relayBurstBytes = 128.0 * 1024;
+    Node host("Host", limited);
     if (!host.session.Host(0)) {
         Check(false, "rate limits: host bind");
         return;
@@ -236,6 +240,80 @@ void TestRateLimits() {
           "rate limit: refills; log at most 1/s", d);
 }
 
+// Default limits (core 0.6): a guest streaming ~400 KB/s to the others through the host (states at 60 Hz plus a
+// 47 KB checkpoint save every half second) loses nothing to the relay limit, and the traffic counters and NetMonitor
+// report it.
+void TestThroughput() {
+    Node host("Host", BaseConfig());
+    if (!host.session.Host(0)) {
+        Check(false, "throughput: host bind");
+        return;
+    }
+    const std::string addr = "127.0.0.1:" + std::to_string(host.transport.BoundPort());
+    Node a("A", BaseConfig()), b("B", BaseConfig());
+    a.session.Join(addr);
+    b.session.Join(addr);
+    Nodes all{&host, &a, &b};
+    if (!Pump(all, 5, [&] { return a.joined && b.joined && host.session.Players().size() == 3; })) {
+        Check(false, "throughput: handshake");
+        return;
+    }
+    int bStates = 0, bSaves = 0, hostStates = 0;
+    b.session.On(300, [&](PlayerId, ByteReader&) { ++bStates; });
+    b.session.On(301, [&](PlayerId, ByteReader& r) { bSaves += r.Rest().size() == 47000; });
+    host.session.On(300, [&](PlayerId, ByteReader&) { ++hostStates; });
+    host.session.On(301, [](PlayerId, ByteReader&) {});
+    NetMonitor monA, monHost;
+    monA.Sample(a.session, Seconds(), 1.0);
+    monHost.Sample(host.session, Seconds(), 1.0);
+    const std::vector<uint8_t> state(1000, 0x33), save(47000, 0x44);
+    const double t0 = Seconds(), kDur = 2.0;
+    int sentStates = 0, sentSaves = 0;
+    double nextState = t0, nextSave = t0;
+    while (Seconds() - t0 < kDur) {
+        const double now = Seconds();
+        while (nextState <= now) {  // 6 x 1000 B per 1/60 s = 360 KB/s
+            for (int k = 0; k < 6; ++k) sentStates += a.session.Broadcast(300, state, Reliability::Unreliable);
+            nextState += 1.0 / 60;
+        }
+        if (nextSave <= now) {  // 94 KB/s
+            sentSaves += a.session.Broadcast(301, save, Reliability::Reliable);
+            nextSave += 0.5;
+        }
+        for (Node* n : all) n->session.Poll();
+        Sleep(1);
+    }
+    Pump(all, 2, [&] { return bSaves == sentSaves && bStates >= sentStates * 95 / 100; });
+    const bool reportA = monA.Sample(a.session, Seconds(), 1.0), reportH = monHost.Sample(host.session, Seconds(), 1.0);
+    const RateLimitStats rl = host.session.RateLimits();
+    const auto& ta = a.session.Traffic();
+    const auto& th = host.session.Traffic();
+    const MsgTraffic st = ta.count(300) ? ta.at(300) : MsgTraffic{};
+    const MsgTraffic hs = th.count(300) ? th.at(300) : MsgTraffic{};
+    char d[300];
+    std::snprintf(d, sizeof d, "B got %d/%d states, %d/%d saves; relay drops %llu; A out %.0f KB/s (monitor)", bStates,
+                  sentStates, bSaves, sentSaves, static_cast<unsigned long long>(rl.appDropped),
+                  monA.Last().outBytesPerS / 1024);
+    Check(rl.appDropped == 0 && bSaves == sentSaves && bStates >= sentStates * 95 / 100,
+          "throughput: 450 KB/s relayed, nothing dropped", d);
+    std::snprintf(d, sizeof d, "A sent %llu msgs %llu B; host recv %llu relayed %llu; host states %d",
+                  static_cast<unsigned long long>(st.sentMsgs), static_cast<unsigned long long>(st.sentBytes),
+                  static_cast<unsigned long long>(hs.recvMsgs), static_cast<unsigned long long>(hs.relayedMsgs),
+                  hostStates);
+    Check(st.sentMsgs == static_cast<uint64_t>(sentStates) && st.sentBytes >= st.sentMsgs * 1000 &&
+              hs.recvMsgs == static_cast<uint64_t>(hostStates) && hs.relayedMsgs == static_cast<uint64_t>(bStates) &&
+              st.sendFailed == 0,
+          "traffic counters: sent / received / relayed", d);
+    bool named = false;
+    monA.nameOf = [](uint16_t id) { return id == 300 ? "State" : nullptr; };
+    std::string lines;
+    for (const auto& l : monHost.LogLines()) lines += l + " | ";
+    for (const auto& l : monHost.LogLines()) named |= l.find("0x012c") != std::string::npos;
+    Check(reportA && reportH && monA.Last().outBytesPerS > 300 * 1024 && monHost.Last().outBytesPerS > 300 * 1024 &&
+              named,
+          "net monitor: rates and per-message lines", lines.substr(0, 200));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -246,6 +324,7 @@ int main(int argc, char** argv) {
 
     TestWire();
     TestRateLimits();
+    TestThroughput();
 
     Node host("Host", BaseConfig());
     if (!host.session.Host(0)) {

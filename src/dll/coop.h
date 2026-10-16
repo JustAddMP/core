@@ -33,6 +33,9 @@ public:
     // game") instead of timing out. Any thread; the caller makes sure no Tick runs at the same time (Mod does).
     // Idempotent.
     static void Shutdown();
+    // Per-peer bandwidth budget in bytes/s (ini `net_budget_kbps`, KiB/s, default 1024): the host's relay limit per
+    // guest; games use it for their net::InterestManager (interest::Config::bytesPerSecond).
+    static double NetBudgetBytesPerS();
     // Lines for the on-screen status panel (empty = draw nothing).
     static void GetStatus(std::vector<render::OverlayLine>& out);
 

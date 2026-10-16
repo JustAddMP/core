@@ -7,6 +7,7 @@
 #include "mc/game_module.h"
 #include "net/lobby.h"
 #include "net/multi_transport.h"
+#include "net/net_monitor.h"
 #include "net/session.h"
 #include "net/steam_flat.h"
 #include "net/steam_lobby.h"
@@ -108,7 +109,19 @@ struct State {
     std::string steamLobbyState;  // host: last mc_state/mc_mode written to the Steam lobby
     bool shutDown = false;
     uint32_t lobbyStarts = 0;     // OnLobbyStart calls (the UI closes the lobby panel on a change)
+
+    // traffic statistics (net/net_monitor.h): every net_log_interval s to the log, every second for the F7 text
+    net::NetMonitor logMon, overlayMon;
 };
+
+// Per-peer bandwidth setting (ini/launcher `net_budget_kbps`, KiB/s; default 1024): the host's relay limit per guest
+// and what games hand their interest manager (Coop::NetBudgetBytesPerS). At least 64.
+double BudgetBytesPerS() {
+    const int kbps = core::Config::Get().GetInt("net_budget_kbps", 1024);
+    return static_cast<double>(std::max(kbps, 64)) * 1024.0;
+}
+
+const char* MsgName(uint16_t id) { return GetGameModule().MessageName(id); }
 
 State& S() {
     static State* s = new State;  // never destroyed: no network teardown during static destruction
@@ -287,7 +300,12 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     cfg.modName = GetGameInfo().modName;
     cfg.password = s.mode == Mode::Host ? s.password : s.joinPassword;
     cfg.invitesSkipPassword = !s.requireInvitePassword;
+    cfg.relayBytesPerS = BudgetBytesPerS();
+    cfg.relayBurstBytes = 2 * cfg.relayBytesPerS;
     s.net = std::move(transport);
+    s.logMon.Reset();
+    s.overlayMon.Reset();
+    s.logMon.nameOf = s.overlayMon.nameOf = &MsgName;
     s.session = std::make_unique<net::Session>(*s.net, cfg);
     net::Session& session = *s.session;
     GetGameModule().OnSessionStart(session);
@@ -296,8 +314,9 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     s.openLobby = false;
     s.hostName.clear();
     s.steamLobbyState.clear();
-    MC_LOG_INFO("coop: session as '%s' over %s (protocol %u, build %08x)", session.Config().playerName.c_str(),
-                s.net->Name(), cfg.protocolVersion, cfg.modBuild);
+    MC_LOG_INFO("coop: session as '%s' over %s (protocol %u, build %08x, relay budget %.0f KB/s per guest)",
+                session.Config().playerName.c_str(), s.net->Name(), cfg.protocolVersion, cfg.modBuild,
+                cfg.relayBytesPerS / 1024);
 
     session.onJoined = [] {
         State& st = S();
@@ -616,8 +635,16 @@ void Coop::Tick(float dt) {
         UpdateSteamLobbyData();
     }
     if (s.session) GetGameModule().SessionTick(dt);
+    if (s.session && s.session->IsActive() && s.session->Players().size() > 1) {
+        static const double logEvery = core::Config::Get().GetInt("net_log_interval", 5);
+        if (logEvery > 0 && s.logMon.Sample(*s.session, s.now, logEvery))
+            for (const std::string& line : s.logMon.LogLines()) MC_LOG_INFO("%s", line.c_str());
+        s.overlayMon.Sample(*s.session, s.now, 1.0);
+    }
     if (s.teardown) Teardown();
 }
+
+double Coop::NetBudgetBytesPerS() { return BudgetBytesPerS(); }
 
 void Coop::Shutdown() {
     State& s = S();
@@ -922,6 +949,7 @@ void Coop::GetStatus(std::vector<render::OverlayLine>& out) {
         }
         if (session.IsActive()) {
             GetGameModule().AppendStatus(out);
+            for (const std::string& line : s.overlayMon.OverlayLines()) out.push_back({line, kColText});
             // Ping column: RTT of each player to the host (the host's own row has none).
             for (const auto& p : players) {
                 std::string line = "  " + p.name;

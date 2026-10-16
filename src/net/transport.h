@@ -48,6 +48,7 @@ struct PeerStats {
     uint64_t bytesSent = 0, bytesReceived = 0;
     uint64_t packetsSent = 0, packetsReceived = 0;
     uint32_t resends = 0;   // reliable retransmissions (backend dependent)
+    uint32_t reliableQueued = 0;  // reliable units (<= 1100 bytes each) not yet acknowledged (UDP; 0 = not known)
 };
 
 using EventHandler = std::function<void(const Event&)>;

@@ -46,8 +46,8 @@ struct KindConfig {
 
 struct Config {
     float cellSize = 64;                  // uniform grid cell (metres)
-    uint32_t bytesPerSecond = 64 * 1024;  // per receiving peer
-    double burstSeconds = 0.1;            // token bucket depth (budget x this, at least the largest message)
+    uint32_t bytesPerSecond = 512 * 1024;  // per receiving peer (core 0.6.0; was 64 KB/s)
+    double burstSeconds = 0.25;            // token bucket depth (budget x this, at least the largest message)
     uint32_t perMessageOverhead = 0;      // added to every entity's size (headers)
     bool sendToOwner = false;             // false: an entity is never relevant to the peer that owns it
     float priorityWeight[kPriorityCount] = {1, 4, 2, 1};  // Critical's weight is unused (always first)

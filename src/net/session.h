@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -57,9 +58,20 @@ struct SessionConfig {
     // (Session::RateLimits()). A rate <= 0 turns that limit off.
     double chatPerS = 5.0;                   // chat messages per second
     double chatBurst = 10.0;                 // chat messages at once
-    double relayBytesPerS = 64.0 * 1024;     // relayed app payload bytes per second
-    double relayBurstBytes = 128.0 * 1024;   // relayed app payload bytes at once (one larger message still passes
+    // Raised in core 0.6.0 (was 64 KiB/s, 128 KiB burst): a guest relaying his player, car and NPC traffic plus a
+    // checkpoint save must never hit it. Games set it from their budget setting (e.g. ini net_budget_kbps).
+    double relayBytesPerS = 1024.0 * 1024;   // relayed app payload bytes per second
+    double relayBurstBytes = 2048.0 * 1024;  // relayed app payload bytes at once (one larger message still passes
                                              // when the bucket is full; it then has to refill)
+};
+
+// Traffic of one app message id since Host()/Join() (docs/protocol.md "Traffic statistics"). Bytes are what the
+// session hands the transport (session header + payload, one count per destination peer), not UDP/IP overhead.
+struct MsgTraffic {
+    uint64_t sentMsgs = 0, sentBytes = 0;        // sent by us (a host broadcast counts once per guest)
+    uint64_t recvMsgs = 0, recvBytes = 0;        // received from the network (not local loopback)
+    uint64_t relayedMsgs = 0, relayedBytes = 0;  // host: forwarded from one guest to the others
+    uint64_t sendFailed = 0;                     // the transport refused it (too large, queue full, peer gone)
 };
 
 // Host: what the rate limits dropped, summed over all guests since Host().
@@ -129,6 +141,8 @@ public:
     Transport& GetTransport() { return transport_; }
     const SessionConfig& Config() const { return cfg_; }
     const RateLimitStats& RateLimits() const { return rateStats_; }
+    // Per app message id (key) traffic since Host()/Join(); see MsgTraffic.
+    const std::map<uint16_t, MsgTraffic>& Traffic() const { return traffic_; }
 
     // ---- session password ----
     // Host: change the required password at any time ("" = none; players already in stay). Guest: the password
@@ -213,6 +227,7 @@ private:
     void DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload);
     bool SendRaw(PeerId peer, const ByteWriter& w, Reliability rel);
     bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except);  // false if any send failed
+    void CountSent(uint16_t id, size_t bytes, int copies, int failed);
     void Fail(const std::string& reason);
     void Reset();
     PlayerInfo* FindByPeer(PeerId peer);
@@ -234,6 +249,8 @@ private:
     double helloSentAt_ = 0, lastPing_ = 0, lastPingTable_ = 0;
     std::unordered_map<PlayerId, GuestLimits> limits_;  // host: per guest
     RateLimitStats rateStats_;
+    std::map<uint16_t, MsgTraffic> traffic_;
+    int lastCopies_ = 0, lastFailed_ = 0;  // set by BroadcastRaw: destinations tried / refused
     double lastRateLog_ = -1e9;
     bool rateLogPending_ = false;
     bool welcomed_ = false;

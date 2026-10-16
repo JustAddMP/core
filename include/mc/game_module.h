@@ -75,6 +75,8 @@ public:
     // ---- co-op UI ----
     virtual int PlayerHealth(net::PlayerId) { return -1; }        // 0..100 for the players panel, -1 = unknown
     virtual void AppendStatus(std::vector<render::OverlayLine>&) {}  // lines for the debug status text
+    // Name of one of the game's app message ids for the traffic statistics (core 0.6), nullptr = shown in hex.
+    virtual const char* MessageName(uint16_t /*msgId*/) { return nullptr; }
     virtual void SetMenuState(const MenuState&) {}                // published every frame
     virtual bool PopMenuCommand(MenuCommand*) { return false; }   // drained every frame
     // Rows for the CO-OP panel, asked every frame while it is open (in every session state, also without one).

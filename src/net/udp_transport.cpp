@@ -933,6 +933,10 @@ bool UdpTransport::GetStats(PeerId id, PeerStats& out) const {
     auto it = impl_->peers.find(id);
     if (it == impl_->peers.end()) return false;
     out = it->second.stats;
+    uint32_t q = 0;
+    for (const auto& u : it->second.rq)
+        if (!u.acked) ++q;
+    out.reliableQueued = q;
     return true;
 }
 

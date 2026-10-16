@@ -78,7 +78,7 @@ Config::Config() {
 
 InterestManager::InterestManager(Config cfg) : cfg_(cfg) {
     if (!(cfg_.cellSize > 1)) cfg_.cellSize = 64;
-    if (!(cfg_.burstSeconds > 0)) cfg_.burstSeconds = 0.1;
+    if (!(cfg_.burstSeconds > 0)) cfg_.burstSeconds = 0.25;
     for (KindConfig& k : cfg_.kinds) {
         if (!(k.enterRadius >= 0)) k.enterRadius = 0;
         if (!(k.leaveRadius >= k.enterRadius)) k.leaveRadius = k.enterRadius;
