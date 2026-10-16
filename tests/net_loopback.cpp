@@ -530,9 +530,32 @@ int main(int argc, char** argv) {
               "clean disconnect seen by host + guest", d);
     }
 
+    // ---- 8a. a busy guest (its Poll() stalls, e.g. a game loading a world) is kept by its keepalive thread ----
+    {
+        host.left.clear();
+        UdpOptions ho = host.transport.Options();
+        ho.timeoutS = 2.0;
+        host.transport.SetOptions(ho);
+        const uint64_t ka0 = g1->transport.KeepalivesSent();
+        g1->polling = false;
+        Pump(all, 5, [&] { return host.HasLeft(id1); });
+        g1->polling = true;
+        Pump(all, 1, nullptr);
+        const uint64_t ka = g1->transport.KeepalivesSent() - ka0;
+        char d[160];
+        std::snprintf(d, sizeof(d), "5 s stall, host timeout 2 s: %s, %llu keepalives from the thread",
+                      host.HasLeft(id1) ? "DROPPED" : "still connected", static_cast<unsigned long long>(ka));
+        Check(!host.HasLeft(id1) && ka >= 10 && host.session.Players().size() == 2, "keepalive thread covers a stall", d);
+        ho.timeoutS = 10.0;
+        host.transport.SetOptions(ho);
+    }
+
     // ---- 8. timeout detection (guest stops responding) ----
     {
         host.left.clear();
+        UdpOptions go = g1->transport.Options();
+        go.keepaliveThreadS = 0;  // a killed process: no keepalive thread either
+        g1->transport.SetOptions(go);
         g1->polling = false;  // simulate a crashed / frozen guest
         t = Seconds();
         bool ok = Pump(all, 15, [&] { return host.HasLeft(id1); });
@@ -542,6 +565,32 @@ int main(int argc, char** argv) {
         std::snprintf(d, sizeof(d), "detected after %.1f s, reason \"%s\"", el, reason.c_str());
         Check(ok && el > 9.5 && el < 12 && reason == "timed out", "timeout detection (10 s)", d);
         g1.reset();
+    }
+
+    // ---- 8b. a hung guest: its keepalive thread gives up after keepaliveMaxStallS, then the host's timeout runs ----
+    {
+        Node g6("Hung", BaseConfig());
+        UdpOptions go = g6.transport.Options();
+        go.keepaliveMaxStallS = 1.5;
+        g6.transport.SetOptions(go);
+        g6.session.Join(addr);
+        Nodes n{&host, &g6};
+        Pump(n, 5, [&] { return g6.joined; });
+        const PlayerId id6 = g6.session.LocalId();
+        UdpOptions ho = host.transport.Options();
+        ho.timeoutS = 2.0;
+        host.transport.SetOptions(ho);
+        host.left.clear();
+        g6.polling = false;
+        t = Seconds();
+        const bool ok = Pump(n, 10, [&] { return host.HasLeft(id6); });
+        const double el = Seconds() - t;
+        char d[160];
+        std::snprintf(d, sizeof(d), "dropped after %.1f s (stall cover 1.5 s + timeout 2 s), %llu keepalives", el,
+                      static_cast<unsigned long long>(g6.transport.KeepalivesSent()));
+        Check(g6.joined && ok && el > 3.0 && el < 5.5, "hung guest dropped after the stall cover", d);
+        ho.timeoutS = 10.0;
+        host.transport.SetOptions(ho);
     }
 
     // ---- 9. host leaves -> guest notified ----

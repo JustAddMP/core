@@ -175,9 +175,26 @@ std::string PlayerName() {
     return "Player";
 }
 
+// How long a silent player is kept (net_timeout_s, default 4 s; was 10 s before core v0.8.0). A game that is only
+// busy (a long load stalls the thread that polls us) keeps sending from the transport's keepalive thread, so this
+// only decides how fast a killed or unplugged game is noticed. Over Steam P2P (net_steam_timeout_s, default 6 s) the
+// keepalives come from the polling thread only, so it is a little longer there.
+double TimeoutS(const char* key, double def) {
+    const int v = core::Config::Get().GetInt(key, static_cast<int>(def));
+    return v < 2 ? 2.0 : v > 60 ? 60.0 : static_cast<double>(v);
+}
+
 net::UdpOptions UdpOpts() {
     net::UdpOptions o;
     o.defaultPort = GetGameInfo().defaultPort;  // "join <ip>" without a port
+    o.timeoutS = TimeoutS("net_timeout_s", 4);
+    return o;
+}
+
+net::SteamOptions SteamOpts() {
+    net::SteamOptions o;
+    o.timeoutS = TimeoutS("net_steam_timeout_s", 6);
+    o.pingIntervalS = 0.5;
     return o;
 }
 
@@ -377,7 +394,7 @@ void JoinSteamHost(uint64_t host) {
     State& s = S();
     if (host == 0) return Fail("the lobby has no host");
     if (host == s.steamId) return Fail("the lobby host is this Steam account (same PC?); use --join 127.0.0.1");
-    auto st = std::make_unique<net::SteamTransport>();
+    auto st = std::make_unique<net::SteamTransport>(SteamOpts());
     if (!st->Init()) return Fail("Steam transport could not start");
     MakeSession(std::move(st));
     s.target = s.lobby.PersonaName(host);
@@ -523,7 +540,7 @@ void TryStart() {
         if (s.transport != "steam") multi->Add(std::make_unique<net::UdpTransport>(UdpOpts()));
         const bool steamPart = wantSteam && s.steam == SteamState::Ready;
         if (steamPart) {
-            auto st = std::make_unique<net::SteamTransport>();
+            auto st = std::make_unique<net::SteamTransport>(SteamOpts());
             st->SetAcceptFilter([](net::PeerId id) { return S().lobby.IsMember(id); });
             steamRaw = st.get();
             multi->Add(std::move(st));

@@ -100,10 +100,42 @@ BYTE DeviceType(void* dev) {
     return t;
 }
 
+// PressGameKey: a key the game should see pressed (keyboard device only)
+std::mutex _keyMutex;
+uint8_t _keyDik = 0;
+ULONGLONG _keyUntil = 0;   // held until then
+bool _keyPressQueued = false, _keyReleaseQueued = false;  // buffered events still to hand out
+DWORD _keySeq = 0x40000000;
+
 HRESULT STDMETHODCALLTYPE StateDetour(GetDeviceStateFn orig, void* self, DWORD size, void* data) {
     const HRESULT hr = orig(self, size, data);
     if (SUCCEEDED(hr) && data && BlockNow()) std::memset(data, 0, size);
+    if (SUCCEEDED(hr) && data && size >= 256 && !BlockNow()) {
+        std::lock_guard lock(_keyMutex);
+        if (_keyDik && GetTickCount64() < _keyUntil && DeviceType(self) == DI8DEVTYPE_KEYBOARD)
+            static_cast<uint8_t*>(data)[_keyDik] = 0x80;
+    }
     return hr;
+}
+
+// Appends the queued press/release of PressGameKey to a buffered keyboard read.
+void AppendGameKey(void* self, DWORD objSize, DIDEVICEOBJECTDATA* data, DWORD* inOut, DWORD capacity) {
+    std::lock_guard lock(_keyMutex);
+    if (!_keyDik || !(_keyPressQueued || _keyReleaseQueued) || DeviceType(self) != DI8DEVTYPE_KEYBOARD) return;
+    auto add = [&](bool down) {
+        if (*inOut >= capacity) return false;
+        auto* ev = reinterpret_cast<DIDEVICEOBJECTDATA*>(reinterpret_cast<uint8_t*>(data) +
+                                                         static_cast<size_t>(*inOut) * objSize);
+        std::memset(ev, 0, objSize);
+        ev->dwOfs = _keyDik;
+        ev->dwData = down ? 0x80 : 0;
+        ev->dwTimeStamp = GetTickCount();
+        ev->dwSequence = ++_keySeq;
+        ++*inOut;
+        return true;
+    };
+    if (_keyPressQueued && add(true)) _keyPressQueued = false;
+    if (!_keyPressQueued && _keyReleaseQueued && GetTickCount64() >= _keyUntil && add(false)) _keyReleaseQueued = false;
 }
 HRESULT STDMETHODCALLTYPE StateDetourA(void* self, DWORD size, void* data) {
     return StateDetour(_origStateA, self, size, data);
@@ -114,7 +146,11 @@ HRESULT STDMETHODCALLTYPE StateDetourW(void* self, DWORD size, void* data) {
 
 HRESULT DataDetour(GetDeviceDataFn orig, void* self, DWORD objSize, DIDEVICEOBJECTDATA* data, DWORD* inOut,
                    DWORD flags) {
+    const DWORD capacity = inOut ? *inOut : 0;
     const HRESULT hr = orig(self, objSize, data, inOut, flags);
+    if (SUCCEEDED(hr) && inOut && data && objSize >= sizeof(DIDEVICEOBJECTDATA) && !(flags & DIGDD_PEEK) &&
+        !BlockNow())
+        AppendGameKey(self, objSize, data, inOut, capacity);
     if (FAILED(hr) || !inOut || !BlockNow()) return hr;
     if (!data || objSize < sizeof(DIDEVICEOBJECTDATA)) {
         *inOut = 0;
@@ -368,6 +404,13 @@ uint16_t PadButtons() {
     if (st.Gamepad.sThumbLY > kStick) b |= XINPUT_GAMEPAD_DPAD_UP;
     if (st.Gamepad.sThumbLY < -kStick) b |= XINPUT_GAMEPAD_DPAD_DOWN;
     return b;
+}
+
+void PressGameKey(uint8_t dik, uint32_t holdMs) {
+    std::lock_guard lock(_keyMutex);
+    _keyDik = dik;
+    _keyUntil = GetTickCount64() + (holdMs ? holdMs : 100);
+    _keyPressQueued = _keyReleaseQueued = true;
 }
 
 void EnableTestPad(bool on) {

@@ -48,4 +48,10 @@ struct TestPadState {
 void EnableTestPad(bool on);
 bool SetTestPad(const TestPadState& state, uint32_t holdMs);
 
+// A key press for the game itself (not our panels): the keyboard's DirectInput state shows DirectInput key `dik`
+// (DIK_*) down for holdMs, and buffered reads get its press and release events, as if the player pressed it. For
+// prompts a game shows that need a key (e.g. a loading screen's "Enter: continue"). Ignored while one of our panels
+// captures input. Any thread.
+void PressGameKey(uint8_t dik, uint32_t holdMs);
+
 }  // namespace mc::ui_input

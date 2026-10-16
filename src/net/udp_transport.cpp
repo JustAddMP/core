@@ -7,11 +7,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -56,6 +61,7 @@ enum PacketType : uint8_t {
     kPong = 6,
     kDisconnect = 7,
     kRefuse = 8,
+    kAlive = 9,  // from the keepalive thread while the sender's Poll() is stalled: only refreshes the timeout
 };
 // A clean disconnect is unreliable (the connection is gone right after): send it several times so the other side
 // learns at once even on a lossy link instead of after the timeout.
@@ -193,6 +199,86 @@ struct UdpTransport::Impl {
     std::vector<Delayed> delayed;
     uint64_t simState = 1;
     uint8_t rxbuf[2048] = {};
+
+    // ---- keepalive thread (UdpOptions::keepaliveThreadS) ----
+    // It only reads kaPeers (a copy Poll() refreshes under kaMu) and the socket, and only sends.
+    struct KaPeer {
+        sockaddr_in addr;
+        uint32_t token;
+    };
+    std::thread kaThread;
+    std::mutex kaMu;
+    std::condition_variable kaCv;
+    bool kaStop = false;
+    std::vector<KaPeer> kaPeers;
+    std::atomic<double> lastPoll{0};
+    std::atomic<uint64_t> kaSent{0};
+    std::atomic<double> kaInterval{0.25}, kaMaxStall{60};  // copies of the options (SetOptions may change them)
+
+    void KaStart() {
+        kaInterval = opt.keepaliveThreadS;
+        kaMaxStall = opt.keepaliveMaxStallS;
+        if (kaThread.joinable() || opt.keepaliveThreadS <= 0 || sock == INVALID_SOCKET) return;
+        {
+            std::lock_guard lock(kaMu);
+            kaStop = false;
+        }
+        lastPoll = Now();
+        kaThread = std::thread([this] { KaLoop(); });
+    }
+    void KaStopThread() {
+        if (!kaThread.joinable()) return;
+        {
+            std::lock_guard lock(kaMu);
+            kaStop = true;
+        }
+        kaCv.notify_all();
+        kaThread.join();
+    }
+    void KaSnapshot() {  // Poll() thread
+        lastPoll = Now();
+        std::lock_guard lock(kaMu);
+        kaPeers.clear();
+        for (auto& kv : peers)
+            if (kv.second.state == PeerState::Connected) kaPeers.push_back({kv.second.addr, kv.second.token});
+    }
+    void KaLoop() {
+        bool stalled = false;
+        std::unique_lock lock(kaMu);
+        while (!kaStop) {
+            const double interval = std::max(0.05, kaInterval.load()), maxStall = kaMaxStall.load();
+            kaCv.wait_for(lock, std::chrono::milliseconds(static_cast<int>(interval * 1000)));
+            if (kaStop) break;
+            if (kaInterval.load() <= 0) {  // switched off
+                stalled = false;
+                continue;
+            }
+            const double stall = Now() - lastPoll.load();
+            if (stall < 2 * interval) {
+                if (stalled) Log(kInfo, "udp: Poll() is back after a stall");
+                stalled = false;
+                continue;
+            }
+            if (stall > maxStall) {
+                if (stalled) Log(kWarn, "udp: Poll() stalled for %.0f s: no more keepalives (the peers time out)", stall);
+                stalled = false;
+                continue;
+            }
+            if (!stalled) {
+                stalled = true;
+                Log(kInfo, "udp: Poll() stalled: the keepalive thread keeps %zu peer(s) up", kaPeers.size());
+            }
+            for (const KaPeer& kp : kaPeers) {
+                uint8_t pkt[kHeaderSize];
+                ByteWriter w(kHeaderSize);
+                Header(w, kAlive, kp.token);
+                std::memcpy(pkt, w.Buffer().data(), kHeaderSize);
+                sendto(sock, reinterpret_cast<const char*>(pkt), static_cast<int>(kHeaderSize), 0,
+                       reinterpret_cast<const sockaddr*>(&kp.addr), sizeof(kp.addr));
+                ++kaSent;
+            }
+        }
+    }
 
     // ---- simulation helpers ----
     float SimRand() {  // xorshift64*, [0,1)
@@ -762,6 +848,7 @@ struct UdpTransport::Impl {
     }
 
     void CloseAll() {
+        KaStopThread();  // before the socket goes
         if (sock != INVALID_SOCKET) {
             for (auto& kv : peers)
                 if (kv.second.state == PeerState::Connected) {
@@ -785,7 +872,11 @@ struct UdpTransport::Impl {
 UdpTransport::UdpTransport(const UdpOptions& opt) : impl_(std::make_unique<Impl>()) { impl_->opt = opt; }
 UdpTransport::~UdpTransport() { Close(); }
 
-void UdpTransport::SetOptions(const UdpOptions& opt) { impl_->opt = opt; }
+void UdpTransport::SetOptions(const UdpOptions& opt) {
+    impl_->opt = opt;
+    impl_->kaInterval = opt.keepaliveThreadS;
+    impl_->kaMaxStall = opt.keepaliveMaxStallS;
+}
 const UdpOptions& UdpTransport::Options() const { return impl_->opt; }
 uint16_t UdpTransport::BoundPort() const { return impl_->boundPort; }
 bool UdpTransport::IsHosting() const { return impl_->hosting; }
@@ -898,7 +989,11 @@ void UdpTransport::Poll(const EventHandler& handler) {
         if (handler) handler(ev);
     }
     m.closedLocally.clear();
-    if (m.sock != INVALID_SOCKET) m.FlushAll();
+    if (m.sock != INVALID_SOCKET) {
+        m.FlushAll();
+        m.KaSnapshot();
+        m.KaStart();
+    }
 }
 
 void UdpTransport::Disconnect(PeerId id) {
@@ -920,6 +1015,7 @@ void UdpTransport::MarkEstablished(PeerId id) {
 }
 
 uint64_t UdpTransport::Evictions() const { return impl_->evictions; }
+uint64_t UdpTransport::KeepalivesSent() const { return impl_->kaSent.load(); }
 
 std::string UdpTransport::PeerAddress(PeerId id) const {
     auto it = impl_->peers.find(id);

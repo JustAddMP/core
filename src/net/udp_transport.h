@@ -1,5 +1,6 @@
 // net: direct UDP transport (Winsock), own reliability layer. Wire format in docs/protocol.md.
-// IPv4 only. Single-threaded: call everything from the thread that calls Poll().
+// IPv4 only. Single-threaded: call everything from the thread that calls Poll(). The one exception is internal: a
+// keepalive thread (UdpOptions::keepaliveThreadS) that only sends ALIVE packets while Poll() is not being called.
 #pragma once
 #include <functional>
 #include <memory>
@@ -14,6 +15,12 @@ struct UdpOptions {
     double timeoutS = 10.0;         // connected peer: drop after this long without any packet
     double connectTimeoutS = 10.0;  // give up connecting after this long
     double pingIntervalS = 0.5;     // keepalive / RTT probe
+    // Keepalive thread: when Poll() has not run for twice this long (the calling thread is stalled, e.g. a game
+    // loading a world), a thread of the transport sends an ALIVE packet to every connected peer at this interval, so
+    // a short timeoutS does not drop a player whose game is only busy. 0 = no thread. It gives up after
+    // keepaliveMaxStallS of stall (a hung process is dropped like a killed one, after that plus the peer's timeout).
+    double keepaliveThreadS = 0.25;
+    double keepaliveMaxStallS = 60.0;
     int maxPeers = 8;               // incoming connection limit when hosting
     int maxPeersPerAddress = 4;     // incoming connections from one IPv4 address (any port)
     // When a limit above is reached, a new connection evicts the oldest incoming one the session has not marked
@@ -56,6 +63,8 @@ public:
     void Flush();
     // Incoming connections evicted to make room (see UdpOptions::maxPeers).
     uint64_t Evictions() const;
+    // ALIVE packets the keepalive thread sent (while Poll() was stalled).
+    uint64_t KeepalivesSent() const;
 
     struct Impl;
 
