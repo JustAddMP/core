@@ -3,6 +3,21 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.7.0 — 2026-10-16
+
+Test input for the co-op panels (a new feature for tests, so a minor release). No breaking changes, no wire protocol
+change, nothing changes for players (off unless `test_input = 1`).
+
+- `dll/test_input.h`: with `test_input = 1` (ini) / `--test_input 1` the dll polls `<dll dir>\dev\<log tag>.input.txt`
+  on the render thread (it keeps running while the game's scripts are paused in menus) and runs it line by line:
+  `pad <buttons> [ms]` (the test pad, which it turns on), `key <vk>`, `move x y`, `click x y`, `wheel +1|-1`,
+  `wait ms`, `open pause|lobby|settings|joinip`, `dump` (the open panel's rows, hit boxes and selection into the log),
+  `log text`. The parser is header-only (`dll/test_input_script.h`).
+- `ui_input::InjectEvent` (an event as if from the window, backbuffer coordinates), `CoopUi::Describe`,
+  `CoopUi::OpenForTest`.
+- Tests: `test_input` (every command, comments, CRLF, bad lines skipped and reported with their line number, button
+  names).
+
 ## v0.6.0 — 2026-10-16
 
 Traffic statistics and higher bandwidth limits (new features, so a minor release). No breaking changes: game repos

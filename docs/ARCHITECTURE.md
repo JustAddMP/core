@@ -47,7 +47,10 @@ src/
                           coop_ui (pause co-op panel with kick / kick and ban, the LOBBY panel, CO-OP SETTINGS, join-by-IP,
                           password and name boxes, banners),
                           ui_input (panel input; blocks the game's DirectInput/XInput/window input while a panel is
-                          open; test pad: a virtual XInput gamepad for automated tests, test_pad = 1), window_place
+                          open; test pad: a virtual XInput gamepad for automated tests, test_pad = 1), test_input (core 0.7: scripted pad
+                          presses, mouse moves/clicks, keys, panel open and dump from dev\<tag>.input.txt on the
+                          render thread, so tests reach our panels while the game's scripts are paused; test_input = 1),
+                          window_place
                           (--window left|right)
   launcher/               launcher (find the game via Steam, CRC check against GameInfo::builds, start suspended,
                           inject, pass --key value as <envPrefix>KEY), args.h (argument parsing; keys that need a
