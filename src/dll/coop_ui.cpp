@@ -1049,6 +1049,15 @@ void CoopUi::Init() {}
 
 bool CoopUi::PanelOpen() { return U().panel != Panel::None; }
 
+bool CoopUi::OpenForTest(const std::string& which) {
+    if (which == "pause") Open(Panel::PauseCoop);
+    else if (which == "lobby") Open(Panel::Lobby);
+    else if (which == "settings") Open(Panel::Settings);
+    else if (which == "joinip") Open(Panel::JoinIp);
+    else return false;
+    return true;
+}
+
 std::string CoopUi::Describe() {
     static const char* const kNames[] = {"none",        "pause CO-OP", "join by IP", "password", "player menu",
                                          "confirm kick", "lobby",       "settings",   "name"};

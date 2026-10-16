@@ -10,6 +10,7 @@
 //   click <x> <y>        left click at (x, y) (a move there first)
 //   wheel <+1|-1>        mouse wheel
 //   wait <ms>            pause before the next command
+//   open <panel>         open one of our panels as its menu entry does: pause, lobby, settings, joinip
 //   dump                 log the open panel: its rows, their hit boxes and the selected row
 //   log <text>           a line in the log
 #include <cstdint>
@@ -21,12 +22,12 @@
 namespace mc::test_input {
 
 struct Command {
-    enum Type { Pad, Key, Move, Click, Wheel, Wait, Dump, Log } type = Log;
+    enum Type { Pad, Key, Move, Click, Wheel, Wait, Dump, Log, Open } type = Log;
     uint16_t buttons = 0;  // Pad
     uint32_t ms = 0;       // Pad: hold time; Wait: pause
     uint32_t code = 0;     // Key: virtual key; Wheel: 1 = up, 0xFFFFFFFF = down
     float x = 0, y = 0;    // Move, Click
-    std::string text;      // Log
+    std::string text;      // Log: the text; Open: the panel
 };
 
 inline bool ParseButtons(const std::string& s, uint16_t* out) {
@@ -133,6 +134,12 @@ inline std::vector<Command> Parse(const std::string& text, std::vector<std::stri
                 continue;
             }
             c.ms = static_cast<uint32_t>(ms);
+        } else if (cmd == "open") {
+            c.type = Command::Open;
+            if (!(ls >> c.text) || (c.text != "pause" && c.text != "lobby" && c.text != "settings" && c.text != "joinip")) {
+                bad("open: pause, lobby, settings or joinip");
+                continue;
+            }
         } else if (cmd == "dump") {
             c.type = Command::Dump;
         } else if (cmd == "log") {

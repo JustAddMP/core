@@ -34,11 +34,13 @@ int main() {
         "wheel -1\n"
         "wait 250\n"
         "dump\n"
-        "log after the clicks\n";
+        "log after the clicks\n"
+        "open settings\n";
     std::vector<std::string> errors;
     const auto c = Parse(script, &errors);
-    Check(errors.empty() && c.size() == 10, "script: 10 commands, no errors", std::to_string(c.size()));
-    if (c.size() == 10) {
+    Check(errors.empty() && c.size() == 11, "script: 11 commands, no errors", std::to_string(c.size()));
+    if (c.size() == 11) {
+        Check(c[10].type == Command::Open && c[10].text == "settings", "open settings");
         Check(c[0].type == Command::Pad && c[0].buttons == 0x0002 && c[0].ms == 150, "pad DOWN: d-pad down, 150 ms");
         Check(c[1].type == Command::Pad && c[1].buttons == 0x3000 && c[1].ms == 300, "pad A+B 300");
         Check(c[2].type == Command::Pad && c[2].buttons == 0x1000 && c[2].ms == 50, "pad hex");
@@ -53,9 +55,9 @@ int main() {
 
     // bad lines are skipped with a reason; the good ones around them stay
     errors.clear();
-    const auto b = Parse("pad Z\npad A 0\nkey\nkey 0x1FF\nmove 10\nclick -5 3\nwheel 2\nwait -1\njump 3\npad UP 100\n",
+    const auto b = Parse("pad Z\npad A 0\nkey\nkey 0x1FF\nmove 10\nclick -5 3\nwheel 2\nwait -1\njump 3\nopen menu\npad UP 100\n",
                          &errors);
-    Check(b.size() == 1 && b[0].type == Command::Pad && b[0].buttons == 0x0001 && errors.size() == 9,
+    Check(b.size() == 1 && b[0].type == Command::Pad && b[0].buttons == 0x0001 && errors.size() == 10,
           "bad lines skipped and reported", std::to_string(errors.size()) + " errors");
     Check(!errors.empty() && errors[0].rfind("line 1:", 0) == 0, "errors name the line", errors.empty() ? "" : errors[0]);
 

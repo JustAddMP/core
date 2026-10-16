@@ -72,6 +72,10 @@ void Run(const test_input::Command& c) {
     case C::Log:
         MC_LOG_INFO("test_input: %s", c.text.c_str());
         break;
+    case C::Open:
+        MC_LOG_INFO("test_input: open %s: %s", c.text.c_str(), CoopUi::OpenForTest(c.text) ? "ok" : "unknown");
+        s.waitLeft = 0.3;  // let it open (and build its rows) before the next command
+        break;
     }
 }
 
