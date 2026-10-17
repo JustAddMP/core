@@ -1,7 +1,8 @@
 // net_motion: unit tests for the remote motion helpers (src/net/remote_motion.h): wire quantisation, quaternion
 // nlerp, the locomotion controller against a simulated AI walker (its real walk/run/sprint speeds differ from the
 // controller's first guess) and the vehicle controller against a car whose physics keeps its velocity and one whose
-// teleports zero it. Prints PASS/FAIL per check; exits non-zero on any failure.
+// teleports zero it (pinned, retried), one whose teleports zero it but gets the wanted velocity back, and an AI
+// sprint slower than the player's (carried shortfall). Prints PASS/FAIL per check; exits non-zero on any failure.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -242,7 +243,47 @@ void TestLocomotion() {
 
 // A car copy: its physics either keeps the velocity it had (and the governed throttle tops it up toward the target
 // speed), or every teleport zeroes it.
-void TestVehicle(bool physicsCarries) {
+// The game's AI sprint is much slower than a player's (Mafia DE: ~3.3 m/s against ~6 m/s): the copy keeps up by
+// carrying the shortfall instead of falling behind until it snaps.
+void TestSlowSprint() {
+    LocomotionController ctl;
+    Walker w;
+    w.realSpeed[2] = 3.1f;
+    w.realSpeed[3] = 3.3f;
+    Vec3 t;
+    const float dt = 1.0f / 60;
+    int snaps = 0;
+    float errMax = 0, carryMax = 0;
+    for (int i = 0; i < 60 * 10; ++i) {
+        const float speed = i < 60 ? 0.0f : 6.2f;
+        t.x += speed * dt;
+        LocomotionInput in;
+        in.target = t;
+        in.targetVel = {speed, 0, 0};
+        in.heading[0] = 1;
+        in.heading[1] = 0;
+        in.sprint = speed > 0;
+        in.haveCopy = true;
+        in.copy = {w.x, w.y, w.z};
+        in.copyHeading[0] = w.hx;
+        in.copyHeading[1] = w.hy;
+        in.dt = dt;
+        const LocomotionCommand c = ctl.Update(in);
+        if (c.fix == LocomotionCommand::Fix::Snap) ++snaps;
+        if (i > 60 * 3) errMax = std::max(errMax, c.error);
+        carryMax = std::max(carryMax, c.carry);
+        w.Apply(c, t);
+        w.Step(dt);
+    }
+    Check(snaps <= 1, "slow AI sprint (3.3 m/s) behind a 6.2 m/s player: no repeated snaps", Fmt("%.0f snaps", snaps));
+    Check(errMax < 1.2f, "slow AI sprint: the copy keeps up (error below 1.2 m once settled)", Fmt("%.2f m", errMax));
+    Check(carryMax > 0.5f, "slow AI sprint: the shortfall is carried", Fmt("%.2f m/s", carryMax));
+}
+
+enum class CarPhysics { Carries, ZeroedByTeleport, ZeroedButVelocityGiven };
+
+void TestVehicle(CarPhysics mode) {
+    const bool physicsCarries = mode != CarPhysics::ZeroedByTeleport;
     VehicleController vc;
     const float dt = 1.0f / 60;
     Vec3 t, p, v;
@@ -277,18 +318,25 @@ void TestVehicle(bool physicsCarries) {
             p.z += c.nudge.z;
             if (!physicsCarries) v = {};
         }
+        if (mode == CarPhysics::ZeroedButVelocityGiven && c.fix != VehicleCommand::Fix::None) {
+            v = {};          // the game's position setter stops the body ...
+            v.x = c.vel.x;   // ... and the glue gives it the wanted velocity right after
+        }
         // physics step: throttle accelerates up to the target speed
         if (physicsCarries) v.x = std::min(v.x + c.power * 10.0f * dt, v.x < speed ? speed : v.x);
         p.x += v.x * dt;
     }
+    const char* what = mode == CarPhysics::Carries ? "car carried by its physics"
+                                                   : "car whose teleport zeroes its speed, velocity given back";
     if (physicsCarries) {
-        Check(pins == 0 && snaps == 0, "car carried by its physics: blended, never pinned or snapped",
+        Check(pins == 0 && snaps == 0, (std::string(what) + ": blended, never pinned or snapped").c_str(),
               Fmt("%.0f pins, %.0f snaps", pins, snaps));
-        Check(errMax < 1.0f, "car carried by its physics: error below 1 m", Fmt("%.2f m", errMax));
+        Check(errMax < 1.0f, (std::string(what) + ": error below 1 m").c_str(), Fmt("%.2f m", errMax));
     } else {
         Check(firstPin > 0 && firstPin * dt < 2.5f, "car whose teleport zeroes its speed: pinned within 2.5 s",
               Fmt("after %.2f s", firstPin * dt));
-        Check(vc.Pinned(), "pinned stays pinned");
+        Check(vc.Retries() >= 1 && vc.Pins() >= 2, "pinned copy retries its physics after 5 s and is pinned again",
+              Fmt("%.0f pins, %.0f retries", vc.Pins(), vc.Retries()));
     }
 }
 
@@ -329,8 +377,10 @@ int main() {
     TestQuant();
     TestNlerp();
     TestLocomotion();
-    TestVehicle(true);
-    TestVehicle(false);
+    TestSlowSprint();
+    TestVehicle(CarPhysics::Carries);
+    TestVehicle(CarPhysics::ZeroedByTeleport);
+    TestVehicle(CarPhysics::ZeroedButVelocityGiven);
     TestVehicleRules();
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

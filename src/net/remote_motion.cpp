@@ -62,10 +62,12 @@ void LocomotionController::Reset() {
     issued_ = false;
     sinceIssue_ = 1e9f;
     sinceChange_ = 0;
+    sinceGait_ = 0;
     stuckT_ = blockedT_ = 0;
     winValid_ = false;
     haveLast_ = false;
     lastNudge_ = {};
+    lastMeasured_ = -1;
 }
 
 LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
@@ -73,6 +75,7 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
     const float dt = std::clamp(in.dt, 0.0f, 0.5f);
     sinceIssue_ += dt;
     sinceChange_ += dt;
+    sinceGait_ += dt;
     if (!in.haveCopy) {
         // Nothing to measure: walk toward the target at the remote speed, no fixes.
         Reset();
@@ -97,7 +100,10 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         const float dx = in.copy.x - winStart_.x - winNudge_.x, dy = in.copy.y - winStart_.y - winNudge_.y;
         measured = Len2(dx, dy) / winT_;
         winValid_ = false;
+        lastMeasured_ = measured;
+        measuredMult_ = std::max(mult_, 0.1f);
     }
+    c.measured = lastMeasured_;
     last_ = in.copy;
     haveLast_ = true;
     lastNudge_ = {};
@@ -144,7 +150,9 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         const int g = GaitIndex(gait_);
         const float init = g == 1 ? t_.walkSpeed : g == 2 ? t_.runSpeed : t_.sprintSpeed;
         const float est = std::clamp(measured / std::max(mult_, 0.1f), init * 0.5f, init * 2.0f);
-        base_[g] += (est - base_[g]) * t_.calibAlpha;
+        // far off the first guess (a game whose AI sprint is much slower): learn faster
+        const float alpha = std::fabs(est - base_[g]) > base_[g] * 0.3f ? std::max(t_.calibAlpha, 0.6f) : t_.calibAlpha;
+        base_[g] += (est - base_[g]) * alpha;
     }
 
     // Wanted velocity: the target's plus a bounded share of the error.
@@ -176,6 +184,26 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
     float mult = 1;
     if (g != Gait::Stand) mult = std::clamp(want / std::max(base_[GaitIndex(g)], 0.1f), t_.minMult, t_.maxMult);
     if (g != gait_ || std::fabs(mult - mult_) > 0.05f) sinceChange_ = 0;
+    c.want = want;
+    // The fastest multiplier still too slow (the game's AI sprint is slower than a player's): carry the shortfall
+    // along the wanted direction as a nudge, so the copy does not fall behind until it snaps.
+    // Not while the copy is still getting up to speed after a gait change (that is not a shortfall).
+    if (g != Gait::Stand && g == gait_ && sinceGait_ >= t_.calibSettle && c.fix != LocomotionCommand::Fix::Snap &&
+        want > 1e-3f) {
+        // what the copy reaches: the calibrated speed, or what it was last measured doing if that is less (the
+        // calibration is still catching up with a slow gait)
+        float reach = base_[GaitIndex(g)] * mult;
+        if (lastMeasured_ >= 0 && g == gait_) reach = std::min(reach, lastMeasured_ / measuredMult_ * mult);
+        const float deficit = want - reach;
+        if (deficit > t_.carryMin) {
+            const float k = deficit * dt / want;
+            c.nudge.x += wx * k;
+            c.nudge.y += wy * k;
+            c.fix = LocomotionCommand::Fix::Nudge;
+            c.carry = deficit;
+            lastNudge_ = c.nudge;
+        }
+    }
 
     // Walk point and when to re-aim.
     bool reissue = false;
@@ -200,6 +228,7 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         issued_ = true;
         sinceIssue_ = 0;
     }
+    if (g != gait_) sinceGait_ = 0;
     gait_ = g;
     mult_ = mult;
     c.gait = g;
@@ -229,6 +258,9 @@ VehicleController::VehicleController(const VehicleTuning& t) : t_(t) {}
 void VehicleController::Reset() {
     pinned_ = false;
     slowT_ = lagT_ = 0;
+    pinnedT_ = retryAfter_ = 0;
+    why_ = VehicleCommand::Why::None;
+    pins_ = retries_ = 0;
 }
 
 VehicleCommand VehicleController::Update(const VehicleInput& in) {
@@ -236,6 +268,8 @@ VehicleCommand VehicleController::Update(const VehicleInput& in) {
     const float dt = std::clamp(in.dt, 0.0f, 0.5f);
     c.power = std::clamp(in.power, 0.0f, 1.0f);
     for (int i = 0; i < 4; ++i) c.rot[i] = in.targetRot[i];
+    c.vel = in.targetVel;
+    c.why = why_;
     if (!in.haveCopy) {
         c.fix = VehicleCommand::Fix::Pin;
         c.pinned = pinned_;
@@ -249,20 +283,57 @@ VehicleCommand VehicleController::Update(const VehicleInput& in) {
     const float cspeed =
         std::sqrt(in.copyVel.x * in.copyVel.x + in.copyVel.y * in.copyVel.y + in.copyVel.z * in.copyVel.z);
 
+    c.tspeed = tspeed;
+    c.cspeed = cspeed;
+    float dot = 0;
+    for (int i = 0; i < 4; ++i) dot += in.copyRot[i] * in.targetRot[i];
+    c.rotErrDeg = 2 * std::acos(std::min(1.0f, std::fabs(dot))) * 180 / kPi;
+
+    // A pinned copy gets its physics back after a while (what kept it from moving may be gone).
+    if (pinned_) {
+        pinnedT_ += dt;
+        if (pinnedT_ >= retryAfter_) {
+            pinned_ = false;
+            slowT_ = lagT_ = 0;
+            c.retried = true;
+            ++retries_;
+        }
+    }
     // Does the copy's own physics carry it? (If the game's teleport zeroes its velocity, it never will.)
-    if (!pinned_) {
+    if (!pinned_ && !c.retried) {
+        VehicleCommand::Why why = VehicleCommand::Why::None;
         if (cspeed > tspeed + t_.runawaySpeed) {
-            pinned_ = true;
+            why = VehicleCommand::Why::Runaway;
         } else if (tspeed > t_.pinSpeed && cspeed < tspeed * t_.pinRatio) {
             slowT_ += dt;
-            if (slowT_ > t_.pinTime) pinned_ = true;
+            if (slowT_ > t_.pinTime) why = VehicleCommand::Why::Slow;
         } else {
             slowT_ = std::max(0.0f, slowT_ - dt);
         }
         lagT_ = (err > t_.lagDist && err <= t_.snapDist && !in.teleported) ? lagT_ + dt : 0;
-        if (lagT_ > t_.lagTime) pinned_ = true;
+        if (why == VehicleCommand::Why::None && lagT_ > t_.lagTime) why = VehicleCommand::Why::Lag;
+        if (why != VehicleCommand::Why::None) {
+            pinned_ = true;
+            why_ = why;
+            pinnedT_ = 0;
+            retryAfter_ = pins_ == 0 ? t_.retryFirst : std::min(t_.retryMax, retryAfter_ * 2);
+            ++pins_;
+            c.justPinned = true;
+        }
     }
     c.pinned = pinned_;
+    c.why = why_;
+    // Wanted velocity: the target's plus a bounded share of the error (pinned or snapped: the target's).
+    if (!pinned_ && !in.teleported && err <= t_.snapDist) {
+        float vx = ex * t_.velGain, vy = ey * t_.velGain, vz = ez * t_.velGain;
+        const float vl = std::sqrt(vx * vx + vy * vy + vz * vz);
+        if (vl > t_.maxVelCorr) {
+            vx *= t_.maxVelCorr / vl;
+            vy *= t_.maxVelCorr / vl;
+            vz *= t_.maxVelCorr / vl;
+        }
+        c.vel = {in.targetVel.x + vx, in.targetVel.y + vy, in.targetVel.z + vz};
+    }
     if (cspeed > tspeed + t_.overspeed) c.power = 0;
 
     if (in.teleported || err > t_.snapDist) {

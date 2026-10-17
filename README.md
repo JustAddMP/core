@@ -2,7 +2,7 @@
 
 The shared, game-agnostic part of the JustAddMP co-op mods: launcher (finds a Steam game, checks its exe build,
 starts it with the mod dll injected), optional "start from Steam" version.dll proxy, and inside the game: crash
-handler, logging, MinHook hooks, Present hook + D3D11 overlay, Steam P2P / UDP networking with a host-authoritative
+handler, logging (plus a per-session sync trace for comparing two games), MinHook hooks, Present hook + D3D11 overlay, Steam P2P / UDP networking with a host-authoritative
 session, Steam lobbies and invites, the co-op panels and banners, and a Scaleform (SWF/AVM2) patcher for native menu
 entries.
 

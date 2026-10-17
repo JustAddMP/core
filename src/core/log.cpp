@@ -1,13 +1,18 @@
 #include "core/log.h"
 
+#include "core/trace.h"
+
 #include <windows.h>
 #include <cstdio>
+#include <string>
 
 namespace mc::core::log {
 namespace {
 
 HANDLE _file = INVALID_HANDLE_VALUE;
 SRWLOCK _lock = SRWLOCK_INIT;
+std::wstring _dir, _base;
+constexpr int kKeepRuns = 5;  // previous logs kept: <name>.1 .. <name>.5
 
 const char* LevelName(Level level) {
     switch (level) {
@@ -49,7 +54,13 @@ bool Init(const std::wstring& dir, const wchar_t* fileName) {
     if (_file == INVALID_HANDLE_VALUE) {
         CreateDirectoryW(dir.c_str(), nullptr);
         std::wstring path = dir + L"\\" + fileName;
+        for (int i = kKeepRuns - 1; i >= 1; --i)
+            MoveFileExW((path + L"." + std::to_wstring(i)).c_str(), (path + L"." + std::to_wstring(i + 1)).c_str(),
+                        MOVEFILE_REPLACE_EXISTING);
         MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+        _dir = dir;
+        _base = fileName;
+        if (_base.size() > 4 && _base.compare(_base.size() - 4, 4, L".log") == 0) _base.resize(_base.size() - 4);
         _file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     }
@@ -69,12 +80,27 @@ void Shutdown() {
 
 bool IsOpen() { return _file != INVALID_HANDLE_VALUE; }
 
+std::wstring Dir() {
+    AcquireSRWLockShared(&_lock);
+    std::wstring d = _dir;
+    ReleaseSRWLockShared(&_lock);
+    return d;
+}
+
+std::wstring BaseName() {
+    AcquireSRWLockShared(&_lock);
+    std::wstring b = _base;
+    ReleaseSRWLockShared(&_lock);
+    return b;
+}
+
 void WriteV(Level level, const char* fmt, va_list args) {
     char buf[2048];
     int len = FormatLine(buf, sizeof(buf), level, fmt, args);
     AcquireSRWLockExclusive(&_lock);
     Emit(buf, len);
     ReleaseSRWLockExclusive(&_lock);
+    trace::Raw(buf, static_cast<size_t>(len));  // own lock, never taken while holding ours
 }
 
 void Write(Level level, const char* fmt, ...) {

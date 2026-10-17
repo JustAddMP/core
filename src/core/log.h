@@ -1,6 +1,7 @@
 #pragma once
 // Line logger: timestamp + thread id, every line written straight to the file (no user-mode buffering).
-// File: <dir>\<fileName>, previous run rotated to <fileName>.1.
+// File: <dir>\<fileName>; the previous runs are kept as <fileName>.1 (newest) .. <fileName>.5. While a sync trace is
+// open (core/trace.h) every line is copied into it too.
 #include <cstdarg>
 #include <string>
 
@@ -12,6 +13,9 @@ enum class Level { Debug, Info, Warn, Error };
 bool Init(const std::wstring& dir, const wchar_t* fileName);
 void Shutdown();
 bool IsOpen();
+// The folder and the file name without ".log" given to Init ("" before it): a sync trace goes next to it.
+std::wstring Dir();
+std::wstring BaseName();
 
 void Write(Level level, const char* fmt, ...);
 void WriteV(Level level, const char* fmt, va_list args);

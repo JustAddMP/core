@@ -3,6 +3,35 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.10.0 — 2026-10-17
+
+Sync traces for comparing two games after a test, and remote motion fixes from the first real two-PC test (Mafia DE
+0.13.0: car copies never rolled, sprinting copies fell up to 3 m behind). New features, so a minor release. No breaking
+changes; the wire protocol version stays 7.
+
+- `core/trace.h`: a per-session trace file next to the main log (`logs\trace\<log name>-<date>-<time>.trace`, the
+  newest 20 kept, at most 1.5 GiB each). Line based, "`<t> <TYPE> <fields>`" with `t` the QueryPerformanceCounter
+  clock in seconds; buffered (written twice a second), thread-safe. While a trace is open every main log line is
+  copied into it, so one file holds the whole session. A game layer writes its own records (states sent and
+  received, controller decisions, readbacks from the game).
+- `core/log.h`: the last five runs' logs are kept (`.1` newest .. `.5`), not just one; `log::Dir()` /
+  `log::BaseName()`.
+- `LocomotionController`:
+  - When even the fastest multiplier (now 1.8, was 1.5) cannot reach the wanted speed, the shortfall is carried as
+    a small nudge along the walk, so a copy whose AI sprint is slower than a player's (Mafia DE: ~3.3 m/s against
+    ~6 m/s) keeps up instead of falling behind and snapping. What the copy reaches is the calibrated speed or, if
+    less, what it was last measured doing; not right after a gait change (that is acceleration, not a shortfall).
+  - A gait whose measured speed is far (> 30 %) off the calibration learns faster.
+  - The command reports the wanted speed, the last measured speed and the carried part (traces, overlay).
+- `VehicleController`:
+  - Every command carries a wanted velocity for the copy (the target's plus a bounded share of the error,
+    1.5/s up to 4 m/s): a game whose position setter stops the body gives it back right after a correction, so the
+    copy keeps rolling under its own physics (a new test simulates exactly that and is never pinned).
+  - A pinned copy gets its physics back after 5 s, then 10, 20, 40 s after each new pin (what kept it from moving may
+    be gone). Why it was pinned (too slow / ran off / stays off), pin and retry counts, target and copy speed and the
+    rotation error are reported.
+- `net_motion` test: slow AI sprint, a zeroing teleport with the velocity given back, pin retries.
+
 ## v0.9.0 — 2026-10-17
 
 Remote motion controllers for games that show other players as locally simulated copies, and launch-time names
