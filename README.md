@@ -46,7 +46,10 @@ out\net_lobby.exe            pre-game lobby (ready, mode, start, late joiner, gu
                              (host left / guest left reported at once)
 out\net_interest.exe         interest management
 out\net_motion.exe           remote motion controllers (locomotion against a simulated AI walker, car copies) and
-                             8-bit control packing
+                             8-bit control packing (also a slow AI sprint, a teleport that stops the body, pin
+                             retries)
+out\core_trace.exe           sync trace (file next to the log, header, log copy, whole lines from 4 threads, only
+                             the newest kept) and the five previous logs kept
 out\net_fuzz.exe             malformed packets against session and UDP transport
 out\pending_join.exe         Steam join requests are handed to the next tick, never acted on mid-poll
 out\crash_dump.exe           crash handler: one minidump for the real crash, none for handled exceptions
