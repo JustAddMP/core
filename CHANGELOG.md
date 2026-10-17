@@ -3,6 +3,38 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.9.0 — 2026-10-17
+
+Remote motion controllers for games that show other players as locally simulated copies, and launch-time names
+that stay launch-time. New features, so a minor release. No breaking changes; the wire protocol version stays 7.
+
+- `net/remote_motion.h` (pure, no game calls):
+  - `LocomotionController`: from the remote target (position, velocity, heading, sprint / in-air flags) and the
+    copy's reported position, a gait (stand / walk / run / sprint, with hysteresis), a speed multiplier for the
+    game's own locomotion (the walk/run/sprint speed at multiplier 1 is calibrated at run time from the copy's
+    measured speed, so a game's nominal speeds need not be known), a walk point ahead along the wanted velocity (or
+    the spot itself when the remote player stands) and when to re-aim it, a position fix that stays small (only the
+    error beyond 0.9 m is nudged, 2/s; a snap beyond 3.5 m / 3 m height, or when the copy is blocked), and a
+    rate-limited turn toward the remote heading while standing. Meant to replace "pull the copy toward the target
+    every tick", which slides its feet.
+  - `VehicleController`: keeps a car copy on its target while its own physics carries it (blended position and
+    rotation correction; nothing applied while it is on target, so the game's own animations on a standing car are
+    not disturbed), switches to pinning it every tick when its physics does not keep up (the game's teleport zeroed
+    its speed), runs off or stays more than 1.5 m off for 1.5 s, snaps on teleports / beyond 4 m, and governs the throttle (none while the copy is faster
+    than its target).
+  - `PackSnorm8` / `PackUnorm8` (and unpack) for control values on the wire; `Nlerp` for quaternions.
+- `Config::GetFileString(key)`: the value from the settings file (or a saved `Set`), ignoring launch overrides.
+- CO-OP SETTINGS > NAME: the box now shows (and SAVE writes) the name saved in the settings, not a `--name` given on
+  the command line for one run (a test's `--name Host` was saved for good by pressing SAVE). The log says when the
+  name comes from the command line, so the Steam name is not used.
+- `core_version.h`: the minor number said 7 since v0.8.0; now 0.9.0 throughout.
+- Tests: `net_motion` (quantisation round trips and clamping, nlerp sign fix; the locomotion controller against a
+  simulated AI walker whose real speeds differ from the first guess: the gait follows stand / walk / run / sprint /
+  turn / stop, no snaps, average error 0.14 m, no position nudges in steady motion, speeds calibrated to within 2 %, a
+  blocked copy snapped after 2 s, a 180 degree standing turn in 0.43 s; the vehicle controller with a physics that
+  carries the car (blended, 0.02 m) and one whose teleport zeroes its speed (pinned after 1.5 s), snap, overspeed,
+  runaway, lag); `config_set` checks `GetFileString`.
+
 ## v0.8.0 — 2026-10-16
 
 Faster detection of a game that was killed, without dropping a player whose game is only busy; a key press for the

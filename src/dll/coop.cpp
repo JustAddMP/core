@@ -631,9 +631,11 @@ void Coop::Init() {
     } else if (cfg.GetBool("host")) {
         s.mode = Mode::Host;
     }
-    MC_LOG_INFO("coop: mode %s%s%s, transport %s, name '%s'", ModeName(s.mode), s.address.empty() ? "" : " ",
+    const bool launchName = !s.name.empty() && s.name != cfg.GetFileString("name");
+    MC_LOG_INFO("coop: mode %s%s%s, transport %s, name '%s'%s", ModeName(s.mode), s.address.empty() ? "" : " ",
                 s.address.c_str(), s.transport.empty() ? "auto" : s.transport.c_str(),
-                s.name.empty() ? "(Steam/Windows)" : s.name.c_str());
+                s.name.empty() ? "(Steam/Windows)" : s.name.c_str(),
+                launchName ? " (from the command line, this run only: the Steam name is not used)" : "");
     if (s.mode == Mode::JoinLobby) MC_LOG_INFO("coop: lobby %llu", static_cast<unsigned long long>(s.lobbyId));
     if (s.steam == SteamState::Disabled) MC_LOG_INFO("coop: Steam disabled by config (steam = 0)");
 }
@@ -863,7 +865,7 @@ bool Coop::PopOpenLobby() {
     return true;
 }
 
-std::string Coop::Name() { return S().name; }
+std::string Coop::Name() { return core::Config::Get().GetFileString("name"); }
 std::string Coop::EffectiveName() { return PlayerName(); }
 
 void Coop::SetName(const std::string& name) {

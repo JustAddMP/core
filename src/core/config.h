@@ -20,6 +20,9 @@ public:
     std::string GetString(const std::string& key, const std::string& def = {}) const;
     int GetInt(const std::string& key, int def = 0) const;
     bool GetBool(const std::string& key, bool def = false) const;
+    // The value the settings file holds (or a Set() saved into it), ignoring launch overrides: what the player
+    // configured, as opposed to a test's --name for this run.
+    std::string GetFileString(const std::string& key, const std::string& def = {}) const;
 
     // Sets key = value for this process (wins over the environment and the file) and saves it into the settings
     // file: the first "key = value" line for that key is replaced (comments and other lines are kept), else a line

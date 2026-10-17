@@ -71,8 +71,10 @@ public:
     static bool PopOpenLobby();
 
     // ---- settings ----
-    static std::string Name();  // the configured player name ("" = Steam persona / Windows user)
-    static std::string EffectiveName();
+    // The name saved in the settings (CO-OP SETTINGS > NAME; "" = Steam persona / Windows user). A launch-time
+    // --name (tests) is used for that run only: it is not what the NAME box shows and is never saved by it.
+    static std::string Name();
+    static std::string EffectiveName();  // what the others see: --name, else the saved name, else the Steam persona
     static void SetName(const std::string& name);  // saved; used from the next session
     enum class Phase { Idle, Starting, Hosting, Joining, Connected };
     struct PlayerRow {

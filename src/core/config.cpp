@@ -152,6 +152,14 @@ int Config::GetInt(const std::string& key, int def) const {
     return (end && *end == '\0') ? static_cast<int>(r) : def;
 }
 
+std::string Config::GetFileString(const std::string& key, const std::string& def) const {
+    std::lock_guard lock(_mutex);
+    const std::string lkey = Lower(key);
+    if (auto it = _set.find(lkey); it != _set.end()) return it->second;
+    auto it = _values.find(lkey);
+    return it == _values.end() ? def : it->second;
+}
+
 bool Config::GetBool(const std::string& key, bool def) const {
     std::string v;
     if (!Lookup(key, v)) return def;

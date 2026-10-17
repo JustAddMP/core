@@ -66,8 +66,11 @@ int main() {
     // 4. Set wins over the environment override; the file keeps the new value too
     SetEnvironmentVariableW(L"MC_CONFIG_SET_TEST_NAME", L"FromEnv");
     Check(c.GetString("name") == "FromEnv", "env wins over the file");
+    Check(c.GetFileString("name") == "Old", "GetFileString ignores the launch override", c.GetFileString("name"));
+    Check(c.GetFileString("missing", "def") == "def", "GetFileString default");
     Check(c.Set("name", "Picked"), "set while env override exists");
     Check(c.GetString("name") == "Picked", "set wins over env", c.GetString("name"));
+    Check(c.GetFileString("name") == "Picked", "GetFileString sees a saved Set");
     SetEnvironmentVariableW(L"MC_CONFIG_SET_TEST_NAME", nullptr);
 
     // 5. rejected input: keys/values with line breaks or '=' in the key
