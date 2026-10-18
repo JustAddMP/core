@@ -100,8 +100,12 @@ std::deque<RawEvent> _events;
 bool AnyHeld() {
     for (int vk : {VK_ESCAPE, VK_RETURN, VK_SPACE, VK_BACK, VK_LBUTTON, VK_UP, VK_DOWN})
         if (GetAsyncKeyState(vk) & 0x8000) return true;
+    // every button a panel acts on (X / Y prompts close some panels: START, INVITE): the press must not reach the game
+    constexpr WORD kPanelButtons = XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y |
+                                   XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_LEFT_SHOULDER |
+                                   XINPUT_GAMEPAD_RIGHT_SHOULDER;
     for (const auto& p : _pad)
-        if (p.load() & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) return true;
+        if (p.load() & kPanelButtons) return true;
     return false;
 }
 

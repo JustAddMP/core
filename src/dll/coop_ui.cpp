@@ -917,10 +917,17 @@ float Hint(render::DrawList& d, float x, float y, const prompts::Prompt& p, prom
     return kw + px * 0.35f + aw + px * 1.2f;
 }
 
-// The open panel's footer, drawn from the same list the pad handling uses (PanelPrompts).
-void DrawPrompts(render::DrawList& d, float x, float y, float px) {
+// The open panel's footer, drawn from the same list the pad handling uses (PanelPrompts); smaller if it would not
+// fit in maxW.
+void DrawPrompts(render::DrawList& d, float x, float y, float px, float maxW) {
     const prompts::Device dev = ui_input::PromptDevice();
-    for (const prompts::Prompt& p : prompts::Shown(PanelPrompts(), dev)) x += Hint(d, x, y, p, dev, px);
+    const auto shown = prompts::Shown(PanelPrompts(), dev);
+    render::DrawList measure;
+    float total = 0;
+    for (const prompts::Prompt& p : shown) total += Hint(measure, 0, 0, p, dev, px);
+    total -= px * 1.2f;  // no gap after the last one
+    if (total > maxW && total > 0) px *= maxW / total;
+    for (const prompts::Prompt& p : shown) x += Hint(d, x, y, p, dev, px);
 }
 
 void DrawToasts(render::DrawList& d, float W, float s) {
@@ -1069,7 +1076,7 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
     }
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
-    DrawPrompts(d, x + pad, y, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
 }
 
 // JOIN FRIEND: friends playing this game (name, and what they do: hosting / not hosting / other version / full),
@@ -1172,7 +1179,7 @@ void DrawFriends(render::DrawList& d, float W, float H, float s) {
         y += irowH;
     }
     y += 30 * s;
-    DrawPrompts(d, x + pad, y, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
 }
 
 void DrawTextBox(render::DrawList& d, float W, float H, float s, float dt, const std::string& title,
@@ -1198,7 +1205,7 @@ void DrawTextBox(render::DrawList& d, float W, float H, float s, float dt, const
     y += fh + 24 * s;
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 20 * s;
-    DrawPrompts(d, x + pad, y, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
 }
 
 // PlayerMenu / ConfirmKick: title, one line of text, the items and the key hints (the text box panel's frame).
@@ -1222,7 +1229,7 @@ void DrawChoice(render::DrawList& d, float W, float H, float s, const std::strin
     y += 16 * s;
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 20 * s;
-    DrawPrompts(d, x + pad, y, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
 }
 
 void DrawPlayerMenu(render::DrawList& d, float W, float H, float s) {
@@ -1321,7 +1328,7 @@ void DrawLobby(render::DrawList& d, float W, float H, float s) {
     }
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
-    DrawPrompts(d, x + pad, y, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
 }
 
 void DrawSettings(render::DrawList& d, float W, float H, float s) {
@@ -1340,7 +1347,7 @@ void DrawSettings(render::DrawList& d, float W, float H, float s) {
     y += 40 * s;
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
-    DrawPrompts(d, x + pad, y, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
 }
 
 void DrawName(render::DrawList& d, float W, float H, float s, float dt) {
