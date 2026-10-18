@@ -3,12 +3,20 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
-## v0.11.0 (unreleased)
+## v0.11.0 — 2026-10-18
 
-A JOIN FRIEND panel, a working physical gamepad on the co-op panels with button prompts like the games' menus, and
-automatic reconnect after a lost connection. New features, so a minor release. Game repos keep building without
-changes (the new `GameModule` reconnect hooks have defaults). The wire protocol version goes to 8 (reconnect
-trailers and PeerDropped), so players need the same build. Not yet tested in a real game.
+A JOIN FRIEND panel, a working physical gamepad on the co-op panels with button prompts like the games' menus,
+automatic reconnect after a lost connection, and lower latency (reliable lanes, send priorities, a session clock and
+an adaptive playout delay). New features, so a minor release. Game repos keep building without changes (the new
+`GameModule` reconnect hooks have defaults; lanes and priorities are opt-in per message id). The wire protocol
+version goes to 9 (8: reconnect trailers and PeerDropped; 9: UDP lane units and the session clock), so players need
+the same build.
+
+Tested in game with Mafia DE 0.15.0 on one PC (two instances, 2026-10-18): the JOIN FRIEND panel and its messages
+(no friend was playing, so listing and joining a friend are not checked), the pad prompts switching between pad and
+keyboard / mouse, reconnect after 15 s (same slot) and after 66 s (slot freed), the session clock and playout
+numbers. The pad guard and `open friends` fixes below came from that test and are not yet checked in game. Two PCs,
+a real friend list and a physical pad are not tested yet.
 
 - JOIN FRIEND panel (`net/steam_friends.h`): the Steam friends who play the game, with what they are doing:
   hosting, in a friend's game, checking, not hosting, other version, full. Found through the friend's lobby
@@ -18,7 +26,7 @@ trailers and PeerDropped), so players need the same build. Not yet tested in a r
   - The version is checked when entering a lobby (invites too), before connecting; Steam lobby join errors
     (`EChatRoomEnterResponse`) are shown in words; rich presence is refreshed every 30 s.
   - `steam_flat`: the friends exports used above, `SetApiForTest`.
-- Physical gamepad on the panels:
+- Physical gamepad on the panels (pad navigation):
   - Every XInput user slot is read (not only the first), empty slots are probed once a second, connect / disconnect
     is logged; an unplugged pad no longer blocks the game's input.
   - `PadNav` (`src/dll/pad_nav.h`): presses only, stick hysteresis with the dominant axis (left / right too),
@@ -42,8 +50,37 @@ trailers and PeerDropped), so players need the same build. Not yet tested in a r
     session callbacks `onPlayerDropped` / `onPlayerResumed` / `onConnectionLost` / `onReconnected`.
   - The CO-OP panels and banners show the state ("CONNECTION LOST - RECONNECTING... 12 S"); over Steam the guest
     re-enters the host's lobby every 10 s if he is no longer in it (UNVERIFIED whether a P2P drop leaves the lobby).
-- `kProtocolVersion` 8.
-- Tests: `steam_friends` (against a fake Steam), `pad_nav`, `ui_prompts`, `net_reconnect`.
+- Latency (docs/protocol.md "Latency"):
+  - `Transport::Flush` / `Session::Flush`: `Coop::Tick` flushes right after `GameModule::SessionTick`, pings are
+    flushed at once (a message no longer waits up to a frame for the next Poll). UDP fast retransmit as soon as a
+    later unit is acknowledged, RTO floor 30 ms; Steam unreliable data goes `NoDelay` once pongs prove it works.
+  - Lanes: `Session::SetLane(firstMsg, lastMsg, lane)` puts reliable app messages on one of 8 ordered streams
+    (`Transport::SendOnLane`; UDP lane units with lane / laneSeq / barrier, Steam lane channels 7 + k). A big or lost
+    message only holds back its own lane; lane 0 never waits for another lane; lane messages still come after the
+    lane-0 messages sent before them. Once a connection uses a lane every reliable unit is laned (lane-0 too), so a
+    build that never uses lanes sends what protocol 8 sent.
+  - Send priorities: `Session::SetPriority(firstMsg, lastMsg, Critical / Normal / Bulk)`, a per-peer send budget
+    (`sendBudgetBytesPerS`, `net_budget_kbps`) that follows loss and the reliable queue; bulk states are thinned and
+    bulk reliable messages deferred in lane order when the link cannot carry everything; `thinned` / `deferred`
+    counters and NetMonitor lines.
+  - Session clock: the Pong carries the host's clock (u64 trailer), burst pings after a join, `SessionTime` /
+    `SessionTimeMs` / `ClockSynced` / `ClockErrorMs`. Every app message carries a send stamp once the clock is synced
+    (App flags bit1, u32, kept by the relay): `Session::MessageAgeMs` / `MessageStampMs` in handlers, per-message age
+    in `MsgTraffic` and NetMonitor; `Session::onAppMessage` sees every app message with its age.
+  - Playout (`net/playout.h`): `PlayoutClock`, an adaptive playout delay from arrival lateness (windowed-minimum
+    offset, slewed render clock) instead of a fixed delay; `Hermite` and `Extrapolate` helpers.
+  - `UdpOptions::testDrop` for loss tests.
+- Pad guard fix: after a pad button closed a panel, the keyboard stayed blocked for good while the game did not poll
+  XInput (a loading screen ignored Enter for minutes after the lobby was closed with pad X). The release guard now
+  reads a held pad state older than 100 ms again (`PadHold`, `src/dll/pad_hold.h`); an unreadable pad counts as
+  released.
+- Test input: `open friends` (the JOIN FRIEND panel) is accepted by the script parser, as `CoopUi::OpenForTest`
+  supports it.
+- `kProtocolVersion` 9.
+- Tests: `steam_friends` (against a fake Steam), `pad_nav` (PadHold too), `ui_prompts`, `net_reconnect` (four players:
+  two guests lost at once come back into their own slots), `net_lobby` (a full lobby of four), `net_latency` (flush,
+  fast retransmit, lanes, priorities, session clock, message age, playout under jitter / loss / drift),
+  `net_loopback` lanes under loss, `test_input` open panels.
 
 ## v0.10.0 — 2026-10-17
 

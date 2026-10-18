@@ -270,7 +270,7 @@ host                                         lost guest                         
 ## Latency
 
 Where a message spends time between one game's `Send` and the other game's handler, and what core does about it
-(core 0.12; measured by `tests/net_latency.cpp` on loopback):
+(core 0.11; measured by `tests/net_latency.cpp` on loopback):
 
 | Stage | Before | Now |
 |---|---|---|
