@@ -49,7 +49,7 @@ Every transport message starts with a one-byte session message type.
 | 0x0B | Auth | G->H | R | u8 has (0 = guest has no password), then if has: 32-byte HMAC-SHA256 answer |
 | 0x0C | Kicked | H->G | R | u8 code (1 kicked, 2 kicked and banned), str reason (<= 256, may be empty); see "Kick and ban" |
 | 0x0D | PeerDropped | H->G | R | u8 id, u16 holdS, str reason: player `id` lost his connection, his slot is held `holdS` seconds; see "Reconnect" |
-| 0x10 | App | both | R/U | varint appId, u8 from, u8 target, u8 flags (bit0 = sent reliable), payload (rest) |
+| 0x10 | App | both | R/U | varint appId, u8 from, u8 target, u8 flags (bit0 = sent reliable, bit1 = stamped), [u32 send stamp: the first sender's `SessionTimeMs()`, if bit1; kept by the host's relay], payload (rest) |
 
 Handshake: transport connects -> guest sends Hello -> host replies Welcome (and broadcasts PeerJoined to the
 others) or Reject (then drops the connection after 1 s so the Reject is delivered). The host drops connections that
@@ -311,6 +311,11 @@ clock is synced within ~0.1-0.2 s of the join (`ClockSynced()`); afterwards once
 the best round trip (an upper bound; on a symmetric route the error is far smaller: 0.2 ms in the loopback test with
 15 +-3 ms each way). A time stamped with `SessionTime()` by one game, read by another: `SessionTime() - stamp` = how
 long it took (including both games' frame waits). A Pong without the trailer (older peer) gives no sample.
+
+Every app message is stamped by the session once the sender's clock is synced (App flags bit1, `u32` send stamp,
+4 bytes): inside a handler `Session::MessageAgeMs()` is its age (send -> handler, both hops for a relayed message,
+-1 when unknown), and `MsgTraffic::agedMsgs / ageSumMs / ageMaxMs` sum it per message id; `NetMonitor` prints the
+mean as `age N ms` per message and the guest's clock offset (`net: clock offset to the host ...`).
 
 ### Playout delay (net/playout.h)
 

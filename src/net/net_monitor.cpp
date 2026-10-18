@@ -89,14 +89,15 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
         const double pout = static_cast<double>(Delta(st.packetsSent, prev.packetsSent)) / dt;
         const double pin = static_cast<double>(Delta(st.packetsReceived, prev.packetsReceived)) / dt;
         const uint32_t resends = Delta(st.resends, prev.resends);
+        const uint32_t fast = Delta(st.fastResends, prev.fastResends);
         totals_.outBytesPerS += out;
         totals_.inBytesPerS += in;
         totals_.resends += resends;
         totals_.maxQueued = std::max(totals_.maxQueued, st.reliableQueued);
         log_.push_back(Fmt("net: %s (%u%s): rtt %.0f ms, loss %.1f %%, out %s (%.0f pkt/s), in %s (%.0f pkt/s), "
-                           "resends +%u, reliable queued %u",
+                           "resends +%u (fast %u), reliable queued %u",
                            p.name.c_str(), p.id, p.id == kHostPlayer ? ", host" : "", st.rttMs, st.loss * 100.0,
-                           Kb(out).c_str(), pout, Kb(in).c_str(), pin, resends, st.reliableQueued));
+                           Kb(out).c_str(), pout, Kb(in).c_str(), pin, resends, fast, st.reliableQueued));
         overlay_.push_back(Fmt("  net %s: out %s, in %s, loss %.0f%%, queued %u", p.name.c_str(), Kb(out).c_str(),
                                Kb(in).c_str(), st.loss * 100.0, st.reliableQueued));
     }
@@ -107,6 +108,7 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
         uint16_t id;
         double out, in, relay, outN, inN;
         uint64_t failed;
+        double ageMs;  // mean age at arrival over the interval (-1 none stamped)
     };
     std::vector<Row> rows;
     for (const auto& [id, t] : traffic) {
@@ -118,7 +120,9 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
               static_cast<double>(Delta(t.relayedBytes, prev.relayedBytes)) / dt,
               static_cast<double>(Delta(t.sentMsgs, prev.sentMsgs)) / dt,
               static_cast<double>(Delta(t.recvMsgs, prev.recvMsgs)) / dt,
-              Delta(t.sendFailed, prev.sendFailed)};
+              Delta(t.sendFailed, prev.sendFailed), -1};
+        const uint64_t aged = Delta(t.agedMsgs, prev.agedMsgs);
+        if (aged > 0) r.ageMs = (t.ageSumMs - prev.ageSumMs) / static_cast<double>(aged);
         totals_.sendFailed += r.failed;
         if (r.out > 0 || r.in > 0 || r.relay > 0 || r.failed) rows.push_back(r);
     }
@@ -132,9 +136,13 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
         msgs += Fmt("%s%s out %.2f KB/s %.0f/s, in %.2f KB/s %.0f/s", msgs.empty() ? "" : "; ", Name(r.id).c_str(),
                     r.out / 1024, r.outN, r.in / 1024, r.inN);
         if (r.relay > 0) msgs += Fmt(", relayed %.2f KB/s", r.relay / 1024);
+        if (r.ageMs >= 0) msgs += Fmt(", age %.1f ms", r.ageMs);
         if (r.failed) msgs += Fmt(", FAILED %llu", static_cast<unsigned long long>(r.failed));
     }
     if (!msgs.empty()) log_.push_back("net: messages: " + msgs);
+    if (!session.IsHost() && session.ClockSynced())
+        log_.push_back(Fmt("net: clock offset to the host %.1f ms (+-%.1f ms)", session.ClockOffsetS() * 1000,
+                           session.ClockErrorMs()));
     for (size_t i = 0; i < rows.size() && i < 3; ++i)
         overlay_.push_back(Fmt("  %s: out %.1f, in %.1f KB/s", Name(rows[i].id).c_str(), rows[i].out / 1024,
                                rows[i].in / 1024));

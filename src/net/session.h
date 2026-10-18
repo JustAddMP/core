@@ -101,6 +101,10 @@ struct MsgTraffic {
     uint64_t recvMsgs = 0, recvBytes = 0;        // received from the network (not local loopback)
     uint64_t relayedMsgs = 0, relayedBytes = 0;  // host: forwarded from one guest to the others
     uint64_t sendFailed = 0;                     // the transport refused it (too large, queue full, peer gone)
+    // Age at arrival (send stamp -> handler, on the session clock) of the received messages that carried a stamp
+    uint64_t agedMsgs = 0;
+    double ageSumMs = 0;
+    float ageMaxMs = 0;
 };
 
 // Host: what the rate limits dropped, summed over all guests since Host().
@@ -174,6 +178,13 @@ public:
     // Set it on host and guests alike (OnSessionStart); it is not sent anywhere. Later calls win for overlaps.
     void SetLane(uint16_t firstMsg, uint16_t lastMsg, uint8_t lane);
     uint8_t LaneOf(uint16_t msgId) const;
+
+    // Inside an app handler: how long ago (ms, session clock) the sender sent this message: its send stamp, kept
+    // through the host's relay, against SessionTime() here. -1 when unknown (not stamped: the sender's clock was not
+    // synced yet; our clock not synced; outside a handler). A message the host sends itself is 0.
+    float MessageAgeMs() const { return curAgeMs_; }
+    // Inside an app handler: the message's send stamp (SessionTimeMs() of the sender), valid when MessageAgeMs() >= 0.
+    uint32_t MessageStampMs() const { return curStampMs_; }
 
     // ---- session clock (docs/protocol.md "Session clock") ----
     // Seconds on the host's clock: the host's own clock, a guest's clock moved by the offset measured with the
@@ -321,7 +332,8 @@ private:
     void HostRemovePlayer(PeerId peer, const std::string& reason);
     bool KickImpl(PlayerId id, std::string_view reason, bool ban);
     bool IsBanned(PeerId peer) const;
-    void DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload);
+    void DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload, bool stamped = false,
+                     uint32_t stampMs = 0);
     bool SendRaw(PeerId peer, const ByteWriter& w, Reliability rel, uint8_t lane = 0);
     bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane = 0);  // false if any failed
     double LocalClock() const;
@@ -333,7 +345,9 @@ private:
     void Reset();
     PlayerInfo* FindByPeer(PeerId peer);
     PlayerInfo* FindMutable(PlayerId id);
-    ByteWriter AppHeader(uint16_t id, PlayerId from, PlayerId target, Reliability rel) const;
+    // stamp: the send stamp to carry (relay: the original sender's); none given = ours now (when our clock is synced)
+    ByteWriter AppHeader(uint16_t id, PlayerId from, PlayerId target, Reliability rel, bool haveStamp = false,
+                         uint32_t stampMs = 0) const;
 
     Transport& transport_;
     SessionConfig cfg_;
@@ -388,6 +402,8 @@ private:
     bool clockSynced_ = false;
     double clockOffset_ = 0;
     float clockErrMs_ = 0;
+    float curAgeMs_ = -1;  // the app message being handled
+    uint32_t curStampMs_ = 0;
 };
 
 }  // namespace mc::net

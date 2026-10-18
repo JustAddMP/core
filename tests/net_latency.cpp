@@ -467,10 +467,11 @@ void TestClock() {
     opt.simLatencyMs = 15;
     opt.simJitterMs = 3;
     Node host("host", hc, opt), guest("guest", gc, opt);
-    std::vector<double> oneWay;
+    std::vector<double> oneWay, ages;
     host.session.On(kMsgClock, [&](PlayerId, ByteReader& r) {
         const double stamp = r.F64();
         if (r.Ok()) oneWay.push_back((host.session.SessionTime() - stamp) * 1000);
+        if (host.session.MessageAgeMs() >= 0) ages.push_back(host.session.MessageAgeMs());
     });
     const double t0 = Seconds();
     if (!Connect(host, guest)) {
@@ -501,6 +502,56 @@ void TestClock() {
     // 15 ms simulated one way (+-3 jitter) plus up to ~0.5 ms polling
     Check(oneWay.size() > 20 && p50 > 10 && p50 < 21, "clock: one-way delay from stamps",
           Fmt("p50 %.2f p95 %.2f ms over %zu", p50, Pct(oneWay, 0.95), oneWay.size()));
+    const double a50 = Pct(ages, 0.5);
+    Check(ages.size() + 2 >= oneWay.size() && std::fabs(a50 - p50) < 2, "clock: MessageAgeMs (core send stamp)",
+          Fmt("p50 %.1f ms over %zu", a50, ages.size()));
+    const auto& tr = host.session.Traffic();
+    const MsgTraffic t = tr.count(kMsgClock) ? tr.at(kMsgClock) : MsgTraffic{};
+    Check(t.agedMsgs > 0 && t.ageMaxMs > 0, "clock: per-message age in Traffic()",
+          Fmt("%llu aged, mean %.1f max %.1f ms", static_cast<unsigned long long>(t.agedMsgs),
+              t.agedMsgs ? t.ageSumMs / static_cast<double>(t.agedMsgs) : 0.0, t.ageMaxMs));
+}
+
+constexpr uint16_t kMsgRelay = 0x7004;
+
+// Guest -> host -> guest keeps the first sender's stamp: the second guest sees both hops.
+void TestRelayAge() {
+    std::printf("-- message age through the host relay\n");
+    SessionConfig cfg;
+    UdpOptions opt;
+    opt.simLatencyMs = 10;
+    Node host("host", cfg, opt), a("a", cfg, opt), b("b", cfg, opt);
+    if (!host.session.Host(0)) return;
+    const std::string addr = "127.0.0.1:" + std::to_string(host.transport.BoundPort());
+    a.session.Join(addr);
+    b.session.Join(addr);
+    std::vector<double> atHost, atB;
+    bool hostOwnZero = true;
+    host.session.On(kMsgRelay, [&](PlayerId from, ByteReader&) {
+        if (from == kHostPlayer) hostOwnZero &= host.session.MessageAgeMs() == 0;
+        else if (host.session.MessageAgeMs() >= 0) atHost.push_back(host.session.MessageAgeMs());
+    });
+    b.session.On(kMsgRelay, [&](PlayerId, ByteReader&) {
+        if (b.session.MessageAgeMs() >= 0) atB.push_back(b.session.MessageAgeMs());
+    });
+    const double until = Seconds() + 3;
+    double next = Seconds() + 1;
+    while (Seconds() < until) {
+        host.session.Poll();
+        a.session.Poll();
+        b.session.Poll();
+        if (Seconds() >= next && a.session.ClockSynced() && b.session.ClockSynced()) {
+            next = Seconds() + 0.05;
+            const uint8_t x = 1;
+            a.session.Broadcast(kMsgRelay, std::span<const uint8_t>(&x, 1), Reliability::Reliable);
+            a.session.Flush();
+            host.session.SendToHost(kMsgRelay, std::span<const uint8_t>(&x, 1));
+        }
+        SpinUntil(Seconds() + 0.0005);
+    }
+    const double h50 = Pct(atHost, 0.5), b50 = Pct(atB, 0.5);
+    Check(atHost.size() > 10 && atB.size() > 10 && h50 > 8 && h50 < 14 && b50 > 18 && b50 < 26 && hostOwnZero,
+          "relay: age covers both hops", Fmt("host p50 %.1f ms, other guest p50 %.1f ms (10 ms per hop)", h50, b50));
 }
 
 }  // namespace
@@ -515,6 +566,7 @@ int main(int argc, char** argv) {
     TestLossRecovery();
     TestLanes();
     TestClock();
+    TestRelayAge();
     timeEndPeriod(1);
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

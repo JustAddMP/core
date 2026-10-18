@@ -60,6 +60,7 @@ enum KickCode : uint8_t {
 };
 
 constexpr uint8_t kAppFlagReliable = 0x01;
+constexpr uint8_t kAppFlagStamped = 0x02;  // u32 send stamp (sender's SessionTimeMs) before the payload (protocol 9)
 
 // Welcome trailer flags (docs/protocol.md "Reconnect")
 constexpr uint8_t kWelcomeResumed = 0x01;   // the host held our slot: same id as before the loss
@@ -882,6 +883,8 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
             r.U8();  // claimed sender, replaced by the real one
             PlayerId target = r.U8();
             uint8_t flags = r.U8();
+            const bool stamped = (flags & kAppFlagStamped) != 0;
+            const uint32_t stampMs = stamped ? r.U32() : 0;
             auto payload = r.Rest();
             if (!r.Ok()) return;
             PlayerId fid = from->id;
@@ -899,9 +902,9 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
                 ++t.recvMsgs;
                 t.recvBytes += r.Position();
             }
-            if (target == kHostPlayer || target == kAllPlayers) DispatchApp(id, fid, payload);
+            if (target == kHostPlayer || target == kAllPlayers) DispatchApp(id, fid, payload, stamped, stampMs);
             if (target != kHostPlayer) {
-                ByteWriter w = AppHeader(id, fid, target, rel);
+                ByteWriter w = AppHeader(id, fid, target, rel, stamped, stampMs);
                 w.Bytes(payload);
                 int copies = 0, failed = 0;
                 const uint8_t lane = LaneOf(id);
@@ -1111,13 +1114,15 @@ void Session::GuestOnMessage(ByteReader& r) {
             uint16_t id = static_cast<uint16_t>(r.VarU32());
             PlayerId from = r.U8();
             r.U8();  // target
-            r.U8();  // flags
+            const uint8_t flags = r.U8();
+            const bool stamped = (flags & kAppFlagStamped) != 0;
+            const uint32_t stampMs = stamped ? r.U32() : 0;
             auto payload = r.Rest();
             if (r.Ok()) {
                 MsgTraffic& t = traffic_[id];
                 ++t.recvMsgs;
                 t.recvBytes += r.Position();
-                DispatchApp(id, from, payload);
+                DispatchApp(id, from, payload, stamped, stampMs);
             }
             break;
         }
@@ -1293,20 +1298,48 @@ std::vector<DroppedPlayer> Session::DroppedPlayers() const {
 void Session::On(uint16_t msgId, AppHandler handler) { handlers_[msgId] = std::move(handler); }
 void Session::Off(uint16_t msgId) { handlers_.erase(msgId); }
 
-void Session::DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload) {
+void Session::DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload, bool stamped,
+                          uint32_t stampMs) {
+    float age = -1;
+    if (from == localId_) {
+        age = 0;  // our own (host loopback)
+        stampMs = SessionTimeMs();
+    } else if (stamped && ClockSynced()) {
+        const int32_t d = static_cast<int32_t>(SessionTimeMs() - stampMs);
+        if (d > -1000 && d < 60000) age = static_cast<float>(std::max(0, d));  // clocks a little off: 0
+    }
+    if (age >= 0 && from != localId_) {
+        MsgTraffic& t = traffic_[id];
+        ++t.agedMsgs;
+        t.ageSumMs += age;
+        t.ageMaxMs = std::max(t.ageMaxMs, age);
+    }
     auto it = handlers_.find(id);
     if (it == handlers_.end()) return;
     ByteReader r(payload);
+    const float prevAge = curAgeMs_;
+    const uint32_t prevStamp = curStampMs_;
+    curAgeMs_ = age;
+    curStampMs_ = stampMs;
     it->second(from, r);
+    curAgeMs_ = prevAge;
+    curStampMs_ = prevStamp;
 }
 
-ByteWriter Session::AppHeader(uint16_t id, PlayerId from, PlayerId target, Reliability rel) const {
-    ByteWriter w(16);
+ByteWriter Session::AppHeader(uint16_t id, PlayerId from, PlayerId target, Reliability rel, bool haveStamp,
+                              uint32_t stampMs) const {
+    if (!haveStamp && ClockSynced()) {
+        haveStamp = true;
+        stampMs = SessionTimeMs();
+    }
+    ByteWriter w(20);
     w.U8(kApp);
     w.VarU32(id);
     w.U8(from);
     w.U8(target);
-    w.U8(rel == Reliability::Reliable ? kAppFlagReliable : 0);
+    w.U8(static_cast<uint8_t>((rel == Reliability::Reliable ? kAppFlagReliable : 0) |
+                              (haveStamp ? kAppFlagStamped : 0)));
+    if (haveStamp) w.U32(stampMs);
     return w;
 }
 
