@@ -47,11 +47,16 @@ void Lobby::Tick() {
     if (!session_ || !session_->IsHost()) return;
     // Player set changed: newcomers start not ready, leavers are forgotten, and everyone gets the state again (a
     // newcomer has none yet).
+    // (joinSeq: a player who lost his connection and came back counts as new, even within one Poll.)
     uint32_t mask = 0;
-    for (const auto& p : session_->Players()) mask |= 1u << (p.id & 31);
-    if (mask != lastPlayerMask_ || session_->Players().size() != lastPlayers_) {
+    size_t seqs = 0;
+    for (const auto& p : session_->Players()) {
+        mask |= 1u << (p.id & 31);
+        seqs += p.joinSeq;
+    }
+    if (mask != lastPlayerMask_ || seqs != lastPlayers_) {
         lastPlayerMask_ = mask;
-        lastPlayers_ = session_->Players().size();
+        lastPlayers_ = seqs;
         std::map<PlayerId, bool> next;
         for (const auto& p : session_->Players()) {
             auto it = ready_.find(p.id);

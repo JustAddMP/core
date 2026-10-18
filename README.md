@@ -42,6 +42,10 @@ out\net_loopback.exe         two sessions over UDP in one process, with loss/lat
 out\net_password.exe         session password (right / wrong / missing / attempt limit)
 out\net_kick.exe             kick and kick-and-ban (reason delivered, PeerLeft, guests cannot kick, bans by
                              address and SteamID, ban list cleared by a new session)
+out\net_reconnect.exe        reconnect after a lost connection (slot held, same id back, others see drop + return,
+                             held slot counts as taken, hold / window expiry, no reconnect after a clean leave, host
+                             leave or kick, a new connection replacing a stale one, a Hello on the live connection,
+                             forged tokens, the token skips the password, kicking a held player)
 out\net_lobby.exe            pre-game lobby (ready, mode, start, late joiner, guests cannot start) and clean leaving
                              (host left / guest left reported at once)
 out\net_interest.exe         interest management

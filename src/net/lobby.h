@@ -67,7 +67,7 @@ private:
     uint32_t startSeq_ = 0;
     bool dirty_ = false;
     bool localReady_ = false;   // guest: what we asked for (shown until the host's state confirms it)
-    size_t lastPlayers_ = 0;    // host: player list signature for change detection
+    size_t lastPlayers_ = 0;    // host: player list signature for change detection (sum of joinSeq)
     uint32_t lastPlayerMask_ = 0;
 };
 

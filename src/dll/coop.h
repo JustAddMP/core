@@ -103,6 +103,9 @@ public:
         bool allReady = true;      // every guest is ready
         bool ready = false;        // we are ready (guest)
         uint32_t starts = 0;       // lobby starts seen (the lobby panel closes when it changes)
+        // guest lost the host and the session is rejoining it (phase stays Connected; docs/protocol.md "Reconnect")
+        bool reconnecting = false;
+        int reconnectLeftS = 0;    // seconds until it gives up
     };
     static Info GetInfo();
 

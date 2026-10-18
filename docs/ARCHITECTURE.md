@@ -35,7 +35,7 @@ src/
                           (features missing on this game build -> banner), names.h (env/kernel names from GameInfo)
   net/                    transport.h (interface), udp_transport (own reliability), steam_transport (ISteamNetworking
                           P2P, flat API), multi_transport, steam_flat (bindings), steam_lobby, session (host-
-                          authoritative star, relay, password, kick/ban), wire (byte writer/reader), auth (BCrypt HMAC),
+                          authoritative star, relay, password, kick/ban, reconnect after a lost connection), wire (byte writer/reader), auth (BCrypt HMAC),
                           interest (interest management, docs/interest.md), lobby (pre-game lobby: ready, mode,
                           start, in-game state; docs/protocol.md "Lobby"), remote_motion (core 0.9: controllers that
                           drive a locally simulated copy of a remote character with the game's own locomotion
@@ -60,7 +60,7 @@ src/
                           value, e.g. --password, refuse to start without one), install (--install / --uninstall)
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
-tests/                    net_loopback, net_password, net_kick, net_lobby, net_interest, net_motion, net_fuzz, proxy_test,
+tests/                    net_loopback, net_password, net_kick, net_reconnect, net_lobby, net_interest, net_motion, net_fuzz, proxy_test,
                           pending_join, crash_dump, launcher_args, config_set, test_input, steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py
@@ -88,6 +88,8 @@ Namespaces: `mc` (GameInfo, GameModule, Mod, Coop, CoopUi), `mc::core`, `mc::net
 | `OnSessionStart(session)` | render | a session was created (host or join): register app message handlers |
 | `SessionTick(dt)` | render | every frame while a session exists, after `Session::Poll` |
 | `OnPlayerLeft(id)` | render | a player left the session |
+| `OnPlayerDropped(id)` | render | a player lost his connection; his slot is held while he rejoins (default: `OnPlayerLeft`) |
+| `OnConnectionLost()` / `OnReconnected(sameSlot)` | render | guest: the host was lost and the session rejoins him (`Session::IsReconnecting`, `ReconnectLeftS`); back in the session (optional) |
 | `OnSessionEnd()` | render | the session is being torn down (leave, disconnect, invite to another game) |
 | `PlayerHealth(id)` | render | players panel (optional; -1 = no column) |
 | `AppendStatus(lines)` | render | debug status text, F7 (optional) |

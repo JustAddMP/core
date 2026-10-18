@@ -15,7 +15,8 @@ SteamLobby (steam_lobby.cpp)  lobby, invites, rich presence -> gives the guest t
 
 Transport guarantees: `Reliable` messages arrive once, in order, per peer, up to 256 KB. `Unreliable` messages may
 be lost or reordered, up to 1100 bytes. A peer that is silent for 10 s is dropped (`Timeout`). Local `Disconnect()`
-raises no event; remote close, timeout, refused and failed connects raise `Disconnected(reason)`.
+raises no event; remote close, timeout, refused and failed connects raise `Disconnected(reason)`. The session treats
+every reason but a remote close as a lost connection (see "Reconnect").
 
 ## Version rules
 
@@ -35,8 +36,8 @@ Every transport message starts with a one-byte session message type.
 
 | Id | Name | Dir | Channel | Body |
 |---|---|---|---|---|
-| 0x01 | Hello | G->H | R | u32 magic `0x504F434D` ("MCOP"), u32 protocolVersion, u32 modBuild, str name (<= 32 bytes used) |
-| 0x02 | Welcome | H->G | R | u8 yourId, u8 maxPlayers, u8 count, count x {u8 id, str name} (includes host and you) |
+| 0x01 | Hello | G->H | R | u32 magic `0x504F434D` ("MCOP"), u32 protocolVersion, u32 modBuild, str name (<= 32 bytes used), str model; reconnect trailer (optional): u8 1, 16-byte resume token |
+| 0x02 | Welcome | H->G | R | u8 yourId, u8 maxPlayers, u8 count, count x {u8 id, str name, str model} (includes host and you); trailer: u8 flags (bit0 resumed: your held slot, bit1 a token follows), 16-byte resume token |
 | 0x03 | Reject | H->G | R | u8 code (1 version, 2 full, 3 bad handshake, 4 password required, 5 wrong password, 6 too many attempts, 7 banned), str reason (human readable) |
 | 0x04 | PeerJoined | H->G | R | u8 id, str name |
 | 0x05 | PeerLeft | H->G | R | u8 id, str reason ("closed by remote", "timed out", ...) |
@@ -47,6 +48,7 @@ Every transport message starts with a one-byte session message type.
 | 0x0A | Challenge | H->G | R | 32 random bytes (only when the host has a password; see "Session password") |
 | 0x0B | Auth | G->H | R | u8 has (0 = guest has no password), then if has: 32-byte HMAC-SHA256 answer |
 | 0x0C | Kicked | H->G | R | u8 code (1 kicked, 2 kicked and banned), str reason (<= 256, may be empty); see "Kick and ban" |
+| 0x0D | PeerDropped | H->G | R | u8 id, u16 holdS, str reason: player `id` lost his connection, his slot is held `holdS` seconds; see "Reconnect" |
 | 0x10 | App | both | R/U | varint appId, u8 from, u8 target, u8 flags (bit0 = sent reliable), payload (rest) |
 
 Handshake: transport connects -> guest sends Hello -> host replies Welcome (and broadcasts PeerJoined to the
@@ -207,7 +209,63 @@ Disconnect packet sent 4 times; Steam: a reliable Disconnect): a guest sees "hos
 `TerminateProcess(self)` are hooked (dll/mod.cpp) and call `Coop::Shutdown()` first (verified in Mafia DE: closing the
 window ends the process through ExitProcess; the others were told 3 ms later). A process killed from outside (Task
 Manager, `taskkill /F`) cannot say goodbye; the others then time out after `net_timeout_s` (default 4 s over UDP,
-`net_steam_timeout_s` 6 s over Steam; 10 s before core v0.8.0).
+`net_steam_timeout_s` 6 s over Steam; 10 s before core v0.8.0). A timeout is a lost connection: the slot is held
+and the guest rejoins (see "Reconnect"); a clean leave is final.
+
+### Reconnect
+
+A guest whose connection is lost keeps playing and rejoins the same host; the host keeps his slot meanwhile.
+"Lost" means the transport reported `Timeout`, `Error` (e.g. Steam's `P2PSessionConnectFail_t` on a live session)
+or anything else except a clean close: a guest who left (`Leave()`, the process ending normally), a host who left
+("host closed the session"), a kick or a ban never start it.
+
+```
+host                                         lost guest                           other guests
+  transport: Timeout/Error for the guest       transport: Timeout/Error for the host
+  player out of Players(), slot held           state Reconnecting, Players() = just us,
+  reconnectHoldS (60 s), onPlayerDropped        LocalId kept, onConnectionLost; nothing
+  PeerDropped{id, holdS, reason} ------------------------------------------------>  out of Players(), onPlayerDropped
+                                               retries: Close + Connect(same address /
+                                               SteamID) after 0.5, 1, 2, 4, 5, 5 ... s
+                                               (reconnectFirstDelayS / MaxDelayS), each
+                                               attempt at most reconnectAttemptS (8 s)
+  <------- Hello{..., 1, resume token}         (UDP: a fresh socket, so a new source port)
+  token matches the held slot (constant-time
+  compare): password and "full" checks skipped
+  Welcome{same id, flags resumed|token, a new token} ->  state Connected, onReconnected(true)
+  PeerJoined{id, name, model} ---------------------------------------------------->  onPlayerResumed (else
+  onPlayerResumed (else onPlayerJoined)                                                  onPlayerJoined)
+```
+
+- Window and hold: the guest gives up after `reconnectWindowS` (60 s; `onDisconnected("connection to host lost:
+  timed out (could not reconnect within 60 s, N attempt(s))")`); the host frees the slot after `reconnectHoldS` (60 s)
+  with `PeerLeft{id, "lost the connection and did not come back"}` and `onPlayerLeft`. A guest that comes back after
+  the hold expired sends an unknown token: he joins as a new player (`onReconnected(false)`, maybe another id; the
+  normal checks apply: password, full, ban). Either value `<= 0` gives the behaviour before reconnect (fail / leave at
+  once).
+- A held slot is taken: its id is not given to a newcomer and it counts for "full". It is not in `Players()` (games
+  drop that player's puppet; `GameModule::OnPlayerDropped`, default `OnPlayerLeft`) and appears in
+  `Session::DroppedPlayers()` (host: its holds; guests: what PeerDropped announced, with the seconds left).
+- Resume token: 16 random bytes (BCryptGenRandom) per admit, in the Welcome trailer; a new one on every admit and
+  resume, forgotten when the player leaves for good. It is the only proof of a slot, so a resume skips the password
+  (the guest was admitted already). Bans still apply (checked before the token). Plaintext like the rest of the
+  session, so it keeps strangers out, not a determined eavesdropper. Never logged.
+- `PlayerInfo::joinSeq` counts entries into `Players()` on each side (every join and resume gets a larger number).
+  Games that diff `Players()` to find newcomers (and send them the world) key by `(id, joinSeq)`, so a player who
+  dropped and came back between two of their ticks is still seen as new; `net::Lobby` does too.
+- A token Hello for a player who is still connected on the host (his old connection has not timed out there yet, e.g.
+  only the host-to-guest direction failed): the old connection is dropped (PeerDropped) and he resumes on the new one.
+  A new Hello on a connection that already completed its handshake (Steam P2P: one connection per SteamID, and the
+  guest's CONNECTs keep the host's side alive) is handled the same way: drop, then a normal Hello on that connection.
+- Kicking a held player (`Kick` / `KickAndBan` with his id) frees the slot at once (PeerLeft "kicked ..."); a ban uses
+  the address and SteamID recorded when he was admitted.
+- Over Steam, the dll also re-enters the host's Steam lobby (every 10 s) if the guest is no longer in it, since the
+  host's accept filter only takes lobby members (UNVERIFIED whether a P2P drop also drops the lobby membership).
+- While reconnecting `IsActive()` is false: sends fail, `GameModule::SessionTick` keeps running, the dll shows the
+  state in its CO-OP panels ("CONNECTION LOST - RECONNECTING... 12 S"); LEAVE CO-OP ends the retries.
+- Compatibility: both trailers are optional and older code ignores trailing bytes and unknown session types, but
+  `kProtocolVersion` should still be bumped with this change (sessions are version-checked anyway).
+- Tests: `tests/net_reconnect.cpp`.
 
 ## UDP transport
 

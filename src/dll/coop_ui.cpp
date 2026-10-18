@@ -267,7 +267,7 @@ void BuildLobbyItems() {
                                              : "START (WAITING FOR PLAYERS)",
                            Action::Start});
         u.items.push_back({"INVITE FRIENDS", Action::Invite});
-    } else if (u.info.phase == Coop::Phase::Connected) {
+    } else if (u.info.phase == Coop::Phase::Connected && !u.info.reconnecting) {
         if (u.info.hostInGame) {
             u.items.push_back({"JOIN GAME (" + ModeName(u.info.hostGameMode) + ")", Action::JoinGame});
         } else {
@@ -795,7 +795,11 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
                                  (info.port == GetGameInfo().defaultPort ? std::string() : ":" + std::to_string(info.port));
         break;
     case Coop::Phase::Joining: status = "JOINING " + Upper(info.target) + "..."; break;
-    case Coop::Phase::Connected: status = "CONNECTED TO " + Upper(info.target); break;
+    case Coop::Phase::Connected:
+        status = info.reconnecting ? "CONNECTION LOST - RECONNECTING TO " + Upper(info.target) + "... " +
+                                         std::to_string(info.reconnectLeftS) + " S"
+                                   : "CONNECTED TO " + Upper(info.target);
+        break;
     }
     d.Text(x + pad, y, status, 22 * s, kTextDim);
     y += 40 * s;
@@ -943,8 +947,9 @@ void DrawLobby(render::DrawList& d, float W, float H, float s) {
         break;
     case Coop::Phase::Joining: status = "JOINING " + Upper(info.target) + "..."; break;
     case Coop::Phase::Connected:
-        status = info.hostInGame ? Upper(info.target) + " IS PLAYING " + ModeName(info.hostGameMode)
-                                 : "WAITING FOR " + Upper(info.target) + " TO START";
+        status = info.reconnecting ? "CONNECTION LOST - RECONNECTING... " + std::to_string(info.reconnectLeftS) + " S"
+                 : info.hostInGame ? Upper(info.target) + " IS PLAYING " + ModeName(info.hostGameMode)
+                                   : "WAITING FOR " + Upper(info.target) + " TO START";
         break;
     }
     d.Text(x + pad, y, status, 22 * s, kTextDim);
