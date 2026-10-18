@@ -59,6 +59,7 @@ struct Node {
     bool joined = false;
     std::string disconnectReason;
     std::vector<std::pair<PlayerId, std::string>> left;  // (id, reason)
+    std::vector<std::pair<PlayerId, std::string>> dropped;  // lost connection, slot held (docs/protocol.md "Reconnect")
     std::vector<PlayerId> joinedPeers;
     std::vector<std::string> chat;
     bool polling = true;
@@ -67,11 +68,17 @@ struct Node {
         session.onJoined = [this] { joined = true; };
         session.onDisconnected = [this](const std::string& r) { disconnectReason = r.empty() ? "?" : r; };
         session.onPlayerLeft = [this](const PlayerInfo& p, const std::string& r) { left.push_back({p.id, r}); };
+        session.onPlayerDropped = [this](const PlayerInfo& p, const std::string& r) { dropped.push_back({p.id, r}); };
         session.onPlayerJoined = [this](const PlayerInfo& p) { joinedPeers.push_back(p.id); };
         session.onChat = [this](PlayerId, const std::string& t) { chat.push_back(t); };
     }
     bool HasLeft(PlayerId id) const {
         for (auto& l : left)
+            if (l.first == id) return true;
+        return false;
+    }
+    bool HasDropped(PlayerId id) const {
+        for (auto& l : dropped)
             if (l.first == id) return true;
         return false;
     }
@@ -552,15 +559,17 @@ int main(int argc, char** argv) {
 
     // ---- 8. timeout detection (guest stops responding) ----
     {
-        host.left.clear();
+        // A timeout is a lost connection: the host holds the slot (onPlayerDropped; onPlayerLeft only if he does not
+        // come back within reconnectHoldS, net_reconnect tests that).
+        host.dropped.clear();
         UdpOptions go = g1->transport.Options();
         go.keepaliveThreadS = 0;  // a killed process: no keepalive thread either
         g1->transport.SetOptions(go);
         g1->polling = false;  // simulate a crashed / frozen guest
         t = Seconds();
-        bool ok = Pump(all, 15, [&] { return host.HasLeft(id1); });
+        bool ok = Pump(all, 15, [&] { return host.HasDropped(id1); });
         double el = Seconds() - t;
-        std::string reason = host.left.empty() ? "" : host.left[0].second;
+        std::string reason = host.dropped.empty() ? "" : host.dropped[0].second;
         char d[160];
         std::snprintf(d, sizeof(d), "detected after %.1f s, reason \"%s\"", el, reason.c_str());
         Check(ok && el > 9.5 && el < 12 && reason == "timed out", "timeout detection (10 s)", d);
@@ -580,10 +589,10 @@ int main(int argc, char** argv) {
         UdpOptions ho = host.transport.Options();
         ho.timeoutS = 2.0;
         host.transport.SetOptions(ho);
-        host.left.clear();
+        host.dropped.clear();
         g6.polling = false;
         t = Seconds();
-        const bool ok = Pump(n, 10, [&] { return host.HasLeft(id6); });
+        const bool ok = Pump(n, 10, [&] { return host.HasDropped(id6); });
         const double el = Seconds() - t;
         char d[160];
         std::snprintf(d, sizeof(d), "dropped after %.1f s (stall cover 1.5 s + timeout 2 s), %llu keepalives", el,

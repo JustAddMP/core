@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <iterator>
 
 #include "net/auth.h"
@@ -33,6 +34,7 @@ enum Msg : uint8_t {
     kChallenge = 0x0A,
     kAuth = 0x0B,
     kKicked = 0x0C,
+    kPeerDropped = 0x0D,
     kApp = 0x10,
 };
 
@@ -52,6 +54,11 @@ enum KickCode : uint8_t {
 };
 
 constexpr uint8_t kAppFlagReliable = 0x01;
+
+// Welcome trailer flags (docs/protocol.md "Reconnect")
+constexpr uint8_t kWelcomeResumed = 0x01;   // the host held our slot: same id as before the loss
+constexpr uint8_t kWelcomeHasToken = 0x02;  // a resume token follows
+constexpr const char* kHoldExpiredReason = "lost the connection and did not come back";
 
 std::string CleanName(std::string s) {
     for (char& c : s)
@@ -115,6 +122,14 @@ void Session::Reset() {
     hostPeer_ = kInvalidPeer;
     welcomed_ = false;
     helloSentAt_ = 0;
+    secrets_.clear();
+    held_.clear();
+    droppedOthers_.clear();
+    resumeToken_ = {};
+    hasResumeToken_ = false;
+    attemptOpen_ = false;  // (reconnectAttempts_ stays readable after a failed reconnect)
+    reconnectUntil_ = reconnectNextAt_ = 0;
+    reconnectOldId_ = kNoPlayer;
 }
 
 bool Session::Host(uint16_t port) {
@@ -140,6 +155,8 @@ bool Session::Host(uint16_t port) {
 bool Session::Join(std::string_view address) {
     if (state_ != SessionState::Idle && state_ != SessionState::Disconnected) Leave();
     Reset();
+    reconnectAttempts_ = 0;
+    reconnectReason_.clear();
     lastError_.clear();
     lastReject_ = RejectReason::None;
     kicked_ = 0;
@@ -195,9 +212,14 @@ void Session::Poll() {
     transport_.Poll([this](const Event& e) { OnEvent(e); });
     if (state_ == SessionState::Idle || state_ == SessionState::Disconnected) return;
     double now = Now();
+    if (state_ == SessionState::Reconnecting) {
+        GuestReconnectPoll(now);
+        return;
+    }
 
     if (state_ == SessionState::Hosting) {
         if (rateLogPending_) LogRateLimits(now);
+        HostExpireHolds(now);
         std::vector<PeerId> drop, rejectNow;
         for (auto& [peer, pend] : pending_) {
             if (pend.kickAt > 0) {
@@ -262,7 +284,12 @@ void Session::OnEvent(const Event& e) {
                 break;
             case EventType::Disconnected:
                 if (pending_.erase(e.peer)) break;
-                HostRemovePlayer(e.peer, ToString(e.reason));
+                // A clean leave ("closed by remote") is final; a lost connection keeps the slot for a while.
+                if (e.reason != DisconnectReason::Remote && e.reason != DisconnectReason::Local &&
+                    cfg_.reconnectHoldS > 0 && FindByPeer(e.peer))
+                    HostHoldPlayer(e.peer, ToString(e.reason));
+                else
+                    HostRemovePlayer(e.peer, ToString(e.reason));
                 break;
             case EventType::Message: {
                 ByteReader r(e.data);
@@ -274,19 +301,19 @@ void Session::OnEvent(const Event& e) {
     }
     if (e.peer != hostPeer_) return;
     switch (e.type) {
-        case EventType::Connected: {
-            ByteWriter w(64);
-            w.U8(kHello);
-            w.U32(kHelloMagic);
-            w.U32(cfg_.protocolVersion);
-            w.U32(cfg_.modBuild);
-            w.Str(cfg_.playerName);
-            w.Str(CleanModel(cfg_.playerModel));
-            SendRaw(hostPeer_, w, Reliability::Reliable);
-            helloSentAt_ = Now();
+        case EventType::Connected:
+            SendHello();
             break;
-        }
         case EventType::Disconnected: {
+            if (state_ == SessionState::Reconnecting) {  // this attempt failed; the next one follows the backoff
+                hostPeer_ = kInvalidPeer;
+                GuestAttemptFailed(ToString(e.reason));
+                break;
+            }
+            if (welcomed_ && e.reason != DisconnectReason::Remote && cfg_.reconnectWindowS > 0) {
+                GuestStartReconnect(std::string("connection to host lost: ") + ToString(e.reason));
+                break;
+            }
             std::string why;
             if (!welcomed_)
                 why = std::string("could not connect to host: ") + ToString(e.reason);
@@ -329,6 +356,10 @@ void Session::HostOnHello(PeerId peer, ByteReader& r) {
         Reject(peer, kRejectBadHello, "invalid handshake");
         return;
     }
+    // Optional trailer: u8 hasToken, then the resume token from our Welcome (a reconnecting guest).
+    bool hasToken = false;
+    ResumeToken token{};
+    if (r.Remaining() >= 1 + kResumeTokenSize && r.U8() == 1) hasToken = r.Bytes(token.data(), token.size());
     if (IsBanned(peer)) {
         Reject(peer, kRejectBanned, "You are banned from this session");
         return;
@@ -340,7 +371,9 @@ void Session::HostOnHello(PeerId peer, ByteReader& r) {
                    std::to_string(build) + ". Both players need the same " + cfg_.modName + " version.");
         return;
     }
-    if (static_cast<int>(players_.size()) >= cfg_.maxPlayers) {
+    // A reconnecting guest with a valid token gets his held slot back (no password: the token proves he was admitted).
+    if (hasToken && HostTryResume(peer, token, name, model)) return;
+    if (static_cast<int>(players_.size() + held_.size()) >= cfg_.maxPlayers) {
         Reject(peer, kRejectFull, "the session is full (" + std::to_string(cfg_.maxPlayers) + " players)");
         return;
     }
@@ -435,26 +468,42 @@ void Session::HostOnAuth(PeerId peer, ByteReader& r) {
     pend.rejectReason = "wrong password";
 }
 
-void Session::HostAdmit(PeerId peer, const std::string& name, const std::string& model) {
-    if (static_cast<int>(players_.size()) >= cfg_.maxPlayers) {
-        Reject(peer, kRejectFull, "the session is full (" + std::to_string(cfg_.maxPlayers) + " players)");
-        return;
-    }
+void Session::HostAdmit(PeerId peer, const std::string& name, const std::string& model, const Held* resume) {
     PlayerId id = kNoPlayer;
-    for (PlayerId c = 1; c < cfg_.maxPlayers; ++c)
-        if (!FindPlayer(c)) {
-            id = c;
-            break;
+    if (resume) {
+        id = resume->info.id;  // his held slot (already taken out of held_ by the caller)
+    } else {
+        if (static_cast<int>(players_.size() + held_.size()) >= cfg_.maxPlayers) {
+            Reject(peer, kRejectFull, "the session is full (" + std::to_string(cfg_.maxPlayers) + " players)");
+            return;
         }
-    if (id == kNoPlayer) {
-        Reject(peer, kRejectFull, "the session is full");
-        return;
+        auto heldId = [&](PlayerId c) {
+            for (const Held& h : held_)
+                if (h.info.id == c) return true;
+            return false;
+        };
+        for (PlayerId c = 1; c < cfg_.maxPlayers; ++c)
+            if (!FindPlayer(c) && !heldId(c)) {
+                id = c;
+                break;
+            }
+        if (id == kNoPlayer) {
+            Reject(peer, kRejectFull, "the session is full");
+            return;
+        }
     }
     pending_.erase(peer);
     transport_.MarkEstablished(peer);  // a real player now: the transport never evicts it to make room
-    PlayerInfo info{id, CleanName(name), CleanModel(model), peer, 0};
+    PlayerInfo info{id, CleanName(name), CleanModel(model), peer, 0, ++joinCounter_};
     players_.push_back(info);
     std::sort(players_.begin(), players_.end(), [](const PlayerInfo& a, const PlayerInfo& b) { return a.id < b.id; });
+    // A fresh resume token for every admit (also a resume): what he sends back if his connection is lost.
+    GuestSecret& sec = secrets_[id];
+    sec = GuestSecret{};
+    const bool haveToken = auth::SecureRandom(sec.token.data(), sec.token.size());
+    if (!haveToken) Log(kWarn, "session: no random bytes for player %u's resume token: he cannot reconnect", id);
+    sec.address = transport_.PeerAddress(peer);
+    sec.steamId = transport_.PeerSteamId(peer);
 
     ByteWriter w(128);
     w.U8(kWelcome);
@@ -466,6 +515,8 @@ void Session::HostAdmit(PeerId peer, const std::string& name, const std::string&
         w.Str(p.name);
         w.Str(p.model);
     }
+    w.U8(static_cast<uint8_t>((resume ? kWelcomeResumed : 0) | (haveToken ? kWelcomeHasToken : 0)));
+    if (haveToken) w.Bytes(sec.token.data(), sec.token.size());
     SendRaw(peer, w, Reliability::Reliable);
 
     ByteWriter j(64);
@@ -474,8 +525,98 @@ void Session::HostAdmit(PeerId peer, const std::string& name, const std::string&
     j.Str(info.name);
     j.Str(info.model);
     BroadcastRaw(j, Reliability::Reliable, id);
+    if (resume) {
+        Log(kInfo, "session: player %u '%s' is back after a lost connection (peer %llu, slot held %.1f s)", id,
+            info.name.c_str(), static_cast<unsigned long long>(peer), cfg_.reconnectHoldS - (resume->until - Now()));
+        if (onPlayerResumed)
+            onPlayerResumed(info);
+        else if (onPlayerJoined)
+            onPlayerJoined(info);
+        return;
+    }
     Log(kInfo, "session: player %u '%s' joined (peer %llu)", id, info.name.c_str(), static_cast<unsigned long long>(peer));
     if (onPlayerJoined) onPlayerJoined(info);
+}
+
+// Host: a guest's connection was lost (timeout / transport error): keep his slot for reconnectHoldS. He leaves
+// Players() (the others get PeerDropped and drop his puppet); a Hello with his resume token gives the slot back.
+void Session::HostHoldPlayer(PeerId peer, const std::string& reason) {
+    auto it = std::find_if(players_.begin(), players_.end(),
+                           [&](const PlayerInfo& p) { return p.peer == peer && p.id != kHostPlayer; });
+    if (it == players_.end()) return;
+    Held h;
+    h.info = *it;
+    h.info.peer = kInvalidPeer;
+    h.until = Now() + cfg_.reconnectHoldS;
+    if (auto s = secrets_.find(h.info.id); s != secrets_.end()) h.secret = s->second;
+    players_.erase(it);
+    if (rateLogPending_) LogRateLimits(-1);
+    limits_.erase(h.info.id);
+    const std::string why = CleanText(reason, kMaxReasonLen);
+    ByteWriter w(64);
+    w.U8(kPeerDropped);
+    w.U8(h.info.id);
+    w.U16(static_cast<uint16_t>(std::clamp(cfg_.reconnectHoldS, 0.0, 65535.0)));
+    w.Str(why);
+    BroadcastRaw(w, Reliability::Reliable, kNoPlayer);
+    Log(kInfo, "session: player %u '%s' lost the connection (%s); slot held for %.0f s", h.info.id,
+        h.info.name.c_str(), why.c_str(), cfg_.reconnectHoldS);
+    const PlayerInfo info = h.info;
+    held_.push_back(std::move(h));
+    if (onPlayerDropped) onPlayerDropped(info, why);
+}
+
+void Session::HostExpireHolds(double now) {
+    for (size_t i = 0; i < held_.size();) {
+        if (held_[i].until > now) {
+            ++i;
+            continue;
+        }
+        const PlayerInfo info = held_[i].info;
+        held_.erase(held_.begin() + static_cast<std::ptrdiff_t>(i));
+        secrets_.erase(info.id);
+        ByteWriter w(64);
+        w.U8(kPeerLeft);
+        w.U8(info.id);
+        w.Str(kHoldExpiredReason);
+        BroadcastRaw(w, Reliability::Reliable, kNoPlayer);
+        Log(kInfo, "session: player %u '%s' did not reconnect within %.0f s; slot freed", info.id, info.name.c_str(),
+            cfg_.reconnectHoldS);
+        if (onPlayerLeft) onPlayerLeft(info, kHoldExpiredReason);
+    }
+}
+
+// Host: Hello with a resume token. A held slot -> back in it; a player still connected (his old connection has not
+// timed out here yet) -> the old connection is dropped and he resumes on the new one. False: unknown token (the hold
+// expired, or another session's token): the Hello goes on as a normal join.
+bool Session::HostTryResume(PeerId peer, const ResumeToken& token, const std::string& name, const std::string& model) {
+    auto match = [&](const ResumeToken& t) { return auth::ConstantTimeEqual(t.data(), token.data(), token.size()); };
+    for (size_t i = 0; i < held_.size(); ++i) {
+        if (!match(held_[i].secret.token)) continue;
+        Held h = std::move(held_[i]);
+        held_.erase(held_.begin() + static_cast<std::ptrdiff_t>(i));
+        Log(kInfo, "session: peer %llu has player %u's resume token: giving the held slot back",
+            static_cast<unsigned long long>(peer), h.info.id);
+        HostAdmit(peer, name, model, &h);
+        return true;
+    }
+    for (const PlayerInfo& p : players_) {
+        if (p.id == kHostPlayer || p.peer == peer) continue;
+        auto s = secrets_.find(p.id);
+        if (s == secrets_.end() || !match(s->second.token)) continue;
+        const PeerId old = p.peer;
+        const PlayerId id = p.id;
+        Log(kInfo,
+            "session: player %u reconnected on a new connection (peer %llu) before his old one (peer %llu) timed out "
+            "here: dropping the old one",
+            id, static_cast<unsigned long long>(peer), static_cast<unsigned long long>(old));
+        transport_.Disconnect(old);
+        HostHoldPlayer(old, "reconnected on a new connection");
+        return HostTryResume(peer, token, name, model);  // now held: resumes above
+    }
+    Log(kInfo, "session: peer %llu sent an unknown resume token (slot given up?): joining as a new player",
+        static_cast<unsigned long long>(peer));
+    return false;
 }
 
 void Session::HostRemovePlayer(PeerId peer, const std::string& reason) {
@@ -486,6 +627,7 @@ void Session::HostRemovePlayer(PeerId peer, const std::string& reason) {
     players_.erase(it);
     if (rateLogPending_) LogRateLimits(-1);  // flush what this player had dropped before the id is reused
     limits_.erase(info.id);
+    secrets_.erase(info.id);
     ByteWriter w(64);
     w.U8(kPeerLeft);
     w.U8(info.id);
@@ -504,7 +646,32 @@ bool Session::KickAndBan(PlayerId id, std::string_view reason) { return KickImpl
 bool Session::KickImpl(PlayerId id, std::string_view reasonIn, bool ban) {
     if (state_ != SessionState::Hosting || id == kHostPlayer) return false;
     const PlayerInfo* p = FindPlayer(id);
-    if (!p) return false;
+    if (!p) {
+        // A held (lost) player: no connection to tell; free his slot (and ban what he had) right away.
+        auto h = std::find_if(held_.begin(), held_.end(), [&](const Held& x) { return x.info.id == id; });
+        if (h == held_.end()) return false;
+        const Held gone = *h;
+        held_.erase(h);
+        secrets_.erase(id);
+        const std::string reason = CleanText(std::string(reasonIn), kMaxReasonLen);
+        if (ban && (!gone.secret.address.empty() || gone.secret.steamId)) {
+            Log(kInfo, "session: banned '%s' (address '%s', SteamID %llu) while he was reconnecting",
+                gone.info.name.c_str(), gone.secret.address.c_str(),
+                static_cast<unsigned long long>(gone.secret.steamId));
+            bans_.push_back({gone.info.name, gone.secret.address, gone.secret.steamId});
+        }
+        std::string left = ban ? "kicked and banned by the host" : "kicked by the host";
+        if (!reason.empty()) left += ": " + reason;
+        left = CleanText(left, kMaxReasonLen);
+        ByteWriter w(64);
+        w.U8(kPeerLeft);
+        w.U8(id);
+        w.Str(left);
+        BroadcastRaw(w, Reliability::Reliable, kNoPlayer);
+        Log(kInfo, "session: held player %u '%s' %s", id, gone.info.name.c_str(), left.c_str());
+        if (onPlayerLeft) onPlayerLeft(gone.info, left);
+        return true;
+    }
     const PeerId peer = p->peer;
     const std::string name = p->name;
     const std::string reason = CleanText(std::string(reasonIn), kMaxReasonLen);
@@ -570,6 +737,16 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
     }
     PlayerInfo* from = FindByPeer(peer);
     if (!from) return;
+    if (type == kHello) {
+        // A Hello on a connection that already finished its handshake: the guest lost us and is reconnecting while
+        // the transport kept (or re-opened) the same connection here, e.g. Steam P2P where the peer id is his SteamID
+        // and his CONNECTs keep the old connection alive. Treat it as a lost connection plus a new join on it.
+        Log(kInfo, "session: player %u sent a new Hello on his existing connection: he is reconnecting", from->id);
+        HostHoldPlayer(peer, "reconnecting");
+        pending_[peer] = Pending{Now(), 0};
+        HostOnHello(peer, r);
+        return;
+    }
     switch (type) {
         case kPing: {
             uint32_t t = r.U32();
@@ -707,35 +884,7 @@ void Session::GuestOnMessage(ByteReader& r) {
     if (!r.Ok()) return;
     if (!welcomed_) {
         if (type == kWelcome) {
-            PlayerId me = r.U8();
-            r.U8();  // max players
-            uint8_t n = r.U8();
-            std::vector<PlayerInfo> list;
-            bool valid = me != kHostPlayer && me < kMaxPlayers;
-            bool haveMe = false, haveHost = false;
-            for (int i = 0; i < n && r.Ok(); ++i) {
-                PlayerInfo p;
-                p.id = r.U8();
-                p.name = CleanName(r.Str(kMaxNameLen * 4));
-                p.model = CleanModel(r.Str(kMaxModelLen));
-                p.peer = p.id == kHostPlayer ? hostPeer_ : kInvalidPeer;
-                if (p.id >= kMaxPlayers) valid = false;
-                for (const PlayerInfo& q : list)
-                    if (q.id == p.id) valid = false;
-                haveMe |= p.id == me;
-                haveHost |= p.id == kHostPlayer;
-                list.push_back(std::move(p));
-            }
-            if (!r.Ok() || !valid || !haveMe || !haveHost) {
-                Fail("invalid welcome from host");
-                return;
-            }
-            players_ = std::move(list);
-            localId_ = me;
-            welcomed_ = true;
-            state_ = SessionState::Connected;
-            Log(kInfo, "session: joined as player %u (%zu players)", me, players_.size());
-            if (onJoined) onJoined();
+            GuestOnWelcome(r);
         } else if (type == kChallenge) {
             uint8_t challenge[auth::kChallengeSize];
             if (!r.Bytes(challenge, sizeof(challenge))) {
@@ -768,10 +917,37 @@ void Session::GuestOnMessage(ByteReader& r) {
             p.name = CleanName(r.Str(kMaxNameLen * 4));
             p.model = CleanModel(r.Str(kMaxModelLen));
             if (!r.Ok() || p.id >= kMaxPlayers || FindPlayer(p.id)) return;
+            p.joinSeq = ++joinCounter_;
+            bool resumed = false;
+            for (auto d = droppedOthers_.begin(); d != droppedOthers_.end(); ++d)
+                if (d->first.id == p.id) {
+                    droppedOthers_.erase(d);
+                    resumed = true;
+                    break;
+                }
             players_.push_back(p);
             std::sort(players_.begin(), players_.end(),
                       [](const PlayerInfo& a, const PlayerInfo& b) { return a.id < b.id; });
-            if (onPlayerJoined) onPlayerJoined(p);
+            if (resumed) Log(kInfo, "session: player %u '%s' is back", p.id, p.name.c_str());
+            if (resumed && onPlayerResumed)
+                onPlayerResumed(p);
+            else if (onPlayerJoined)
+                onPlayerJoined(p);
+            break;
+        }
+        case kPeerDropped: {
+            PlayerId id = r.U8();
+            const uint16_t holdS = r.U16();
+            std::string reason = CleanText(r.Str(kMaxReasonLen), kMaxReasonLen);
+            if (!r.Ok() || id == localId_ || id == kHostPlayer) return;
+            auto it = std::find_if(players_.begin(), players_.end(), [&](const PlayerInfo& p) { return p.id == id; });
+            if (it == players_.end()) return;
+            PlayerInfo info = *it;
+            players_.erase(it);
+            droppedOthers_.push_back({info, Now() + holdS});
+            Log(kInfo, "session: player %u '%s' lost the connection (%s); the host holds the slot for %u s", id,
+                info.name.c_str(), reason.c_str(), holdS);
+            if (onPlayerDropped) onPlayerDropped(info, reason);
             break;
         }
         case kPeerLeft: {
@@ -779,7 +955,17 @@ void Session::GuestOnMessage(ByteReader& r) {
             std::string reason = r.Str(kMaxReasonLen);
             if (!r.Ok() || id == localId_ || id == kHostPlayer) return;  // we and the host never "leave" by message
             auto it = std::find_if(players_.begin(), players_.end(), [&](const PlayerInfo& p) { return p.id == id; });
-            if (it == players_.end()) return;
+            if (it == players_.end()) {
+                // a dropped player who did not come back (or was kicked while gone)
+                for (auto d = droppedOthers_.begin(); d != droppedOthers_.end(); ++d)
+                    if (d->first.id == id) {
+                        PlayerInfo info = d->first;
+                        droppedOthers_.erase(d);
+                        if (onPlayerLeft) onPlayerLeft(info, reason);
+                        break;
+                    }
+                return;
+            }
             PlayerInfo info = *it;
             players_.erase(it);
             if (onPlayerLeft) onPlayerLeft(info, reason);
@@ -847,6 +1033,165 @@ void Session::GuestOnMessage(ByteReader& r) {
         default:
             break;
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// guest: handshake and reconnect (docs/protocol.md "Reconnect")
+
+void Session::SendHello() {
+    ByteWriter w(96);
+    w.U8(kHello);
+    w.U32(kHelloMagic);
+    w.U32(cfg_.protocolVersion);
+    w.U32(cfg_.modBuild);
+    w.Str(cfg_.playerName);
+    w.Str(CleanModel(cfg_.playerModel));
+    const bool resume = state_ == SessionState::Reconnecting && hasResumeToken_;
+    if (resume) {  // trailer: we were in this session; the token asks for our held slot
+        w.U8(1);
+        w.Bytes(resumeToken_.data(), resumeToken_.size());
+    }
+    SendRaw(hostPeer_, w, Reliability::Reliable);
+    helloSentAt_ = Now();
+    if (state_ == SessionState::Reconnecting)
+        Log(kInfo, "session: reconnect attempt %d: connected, Hello sent%s", reconnectAttempts_,
+            resume ? " with our resume token" : " (no resume token: joining as a new player)");
+}
+
+void Session::GuestOnWelcome(ByteReader& r) {
+    PlayerId me = r.U8();
+    r.U8();  // max players
+    uint8_t n = r.U8();
+    std::vector<PlayerInfo> list;
+    bool valid = me != kHostPlayer && me < kMaxPlayers;
+    bool haveMe = false, haveHost = false;
+    for (int i = 0; i < n && r.Ok(); ++i) {
+        PlayerInfo p;
+        p.id = r.U8();
+        p.name = CleanName(r.Str(kMaxNameLen * 4));
+        p.model = CleanModel(r.Str(kMaxModelLen));
+        p.peer = p.id == kHostPlayer ? hostPeer_ : kInvalidPeer;
+        if (p.id >= kMaxPlayers) valid = false;
+        for (const PlayerInfo& q : list)
+            if (q.id == p.id) valid = false;
+        haveMe |= p.id == me;
+        haveHost |= p.id == kHostPlayer;
+        list.push_back(std::move(p));
+    }
+    if (!r.Ok() || !valid || !haveMe || !haveHost) {
+        Fail("invalid welcome from host");
+        return;
+    }
+    // Trailer (an older host sends none): u8 flags, then the resume token if flag 2.
+    uint8_t flags = 0;
+    if (r.Remaining() >= 1) flags = r.U8();
+    hasResumeToken_ = false;
+    if ((flags & kWelcomeHasToken) && r.Remaining() >= kResumeTokenSize)
+        hasResumeToken_ = r.Bytes(resumeToken_.data(), resumeToken_.size());
+    for (PlayerInfo& p : list) p.joinSeq = ++joinCounter_;
+    players_ = std::move(list);
+    welcomed_ = true;
+    const bool reconnect = state_ == SessionState::Reconnecting;
+    state_ = SessionState::Connected;
+    if (!reconnect) {
+        localId_ = me;
+        Log(kInfo, "session: joined as player %u (%zu players)", me, players_.size());
+        if (onJoined) onJoined();
+        return;
+    }
+    const bool sameSlot = (flags & kWelcomeResumed) && me == reconnectOldId_;
+    localId_ = me;
+    attemptOpen_ = false;
+    droppedOthers_.clear();  // the Welcome's list is the truth now
+    Log(kInfo, "session: reconnected after %.1f s (%d attempt(s)): %s player %u (%zu players)",
+        cfg_.reconnectWindowS - (reconnectUntil_ - Now()), reconnectAttempts_,
+        sameSlot ? "same slot, still" : "slot was given up, now", me, players_.size());
+    reconnectReason_.clear();
+    if (onReconnected) onReconnected(sameSlot);
+}
+
+// The connection to the host was lost (not a clean close, not a kick): keep the session and rejoin with backoff.
+// Players() keeps only us (the others' puppets go; they come back with the host's Welcome), LocalId() stays.
+void Session::GuestStartReconnect(const std::string& reason) {
+    const double now = Now();
+    Log(kWarn, "session: %s; reconnecting to %s for up to %.0f s (%s)", reason.c_str(), lastJoinAddress_.c_str(),
+        cfg_.reconnectWindowS, hasResumeToken_ ? "with our resume token" : "no resume token: as a new player");
+    reconnectReason_ = reason;
+    reconnectOldId_ = localId_;
+    PlayerInfo self;
+    if (const PlayerInfo* me = FindPlayer(localId_)) self = *me;
+    self.id = localId_;
+    self.peer = kInvalidPeer;
+    self.rttMs = 0;
+    players_.clear();
+    players_.push_back(self);
+    droppedOthers_.clear();
+    welcomed_ = false;
+    hostPeer_ = kInvalidPeer;
+    attemptOpen_ = false;
+    helloSentAt_ = 0;
+    transport_.Close();
+    state_ = SessionState::Reconnecting;
+    reconnectUntil_ = now + cfg_.reconnectWindowS;
+    reconnectDelay_ = std::max(0.05, cfg_.reconnectFirstDelayS);
+    reconnectNextAt_ = now + reconnectDelay_;
+    reconnectAttempts_ = 0;
+    if (onConnectionLost) onConnectionLost(reason);
+}
+
+void Session::GuestAttemptFailed(const char* why) {
+    Log(kInfo, "session: reconnect attempt %d failed (%s); next in %.1f s, %.0f s left", reconnectAttempts_, why,
+        std::min(reconnectDelay_ * 2, std::max(cfg_.reconnectMaxDelayS, 0.05)), ReconnectLeftS());
+    if (hostPeer_) transport_.Disconnect(hostPeer_);
+    hostPeer_ = kInvalidPeer;
+    attemptOpen_ = false;
+    welcomed_ = false;
+    helloSentAt_ = 0;
+    transport_.Close();  // the next attempt starts from a fresh socket (UDP: a new source port)
+    reconnectDelay_ = std::min(reconnectDelay_ * 2, std::max(cfg_.reconnectMaxDelayS, 0.05));
+    reconnectNextAt_ = Now() + reconnectDelay_;
+}
+
+void Session::GuestReconnectPoll(double now) {
+    if (now >= reconnectUntil_) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), " (could not reconnect within %.0f s, %d attempt(s))", cfg_.reconnectWindowS,
+                      reconnectAttempts_);
+        const std::string why = reconnectReason_ + buf;
+        attemptOpen_ = false;
+        Fail(why);  // onDisconnected: the session is over
+        return;
+    }
+    if (attemptOpen_) {
+        if (now - attemptStartedAt_ > cfg_.reconnectAttemptS) GuestAttemptFailed("no answer");
+        return;
+    }
+    if (now < reconnectNextAt_) return;
+    ++reconnectAttempts_;
+    transport_.Close();
+    hostPeer_ = transport_.Connect(lastJoinAddress_);
+    if (!hostPeer_) {
+        GuestAttemptFailed("the transport could not start a connection");
+        return;
+    }
+    attemptOpen_ = true;
+    attemptStartedAt_ = now;
+    welcomed_ = false;
+    helloSentAt_ = 0;
+    Log(kInfo, "session: reconnect attempt %d to %s over %s (%.0f s left)", reconnectAttempts_,
+        lastJoinAddress_.c_str(), transport_.Name(), reconnectUntil_ - now);
+}
+
+double Session::ReconnectLeftS() const {
+    return state_ == SessionState::Reconnecting ? std::max(0.0, reconnectUntil_ - Now()) : 0.0;
+}
+
+std::vector<DroppedPlayer> Session::DroppedPlayers() const {
+    std::vector<DroppedPlayer> out;
+    const double now = Now();
+    for (const Held& h : held_) out.push_back({h.info, std::max(0.0, h.until - now)});
+    for (const auto& [info, until] : droppedOthers_) out.push_back({info, std::max(0.0, until - now)});
+    return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

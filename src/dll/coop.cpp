@@ -115,6 +115,9 @@ struct State {
 
     // traffic statistics (net/net_monitor.h): every net_log_interval s to the log, every second for the F7 text
     net::NetMonitor logMon, overlayMon;
+
+    // reconnect (docs/protocol.md "Reconnect"): guest lost the host and the session retries
+    double lobbyRejoinAt = 0;  // JoinLobby: next time we may re-enter the Steam lobby while reconnecting
 };
 
 // Per-peer bandwidth setting (ini/launcher `net_budget_kbps`, KiB/s; default 1024): the host's relay limit per guest
@@ -361,10 +364,43 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     session.onPlayerLeft = [](const net::PlayerInfo& p, const std::string& reason) {
         MC_LOG_INFO("coop: player %u '%s' left: %s", p.id, p.name.c_str(), reason.c_str());
         const bool kicked = reason.rfind("kicked", 0) == 0;  // "kicked by the host" / "kicked and banned by the host"
-        Notify("CO-OP", kicked                    ? p.name + " was " + reason
-                        : reason == "timed out" ? p.name + " lost the connection"
-                                                : p.name + " left the game");
+        const bool lost = reason == "timed out" || reason.rfind("lost the connection", 0) == 0;
+        Notify("CO-OP", kicked ? p.name + " was " + reason
+                        : lost ? p.name + " lost the connection and did not come back"
+                               : p.name + " left the game");
         GetGameModule().OnPlayerLeft(p.id);
+    };
+    // Reconnect (docs/protocol.md "Reconnect"): a player's connection was lost; his slot is held while he rejoins.
+    session.onPlayerDropped = [](const net::PlayerInfo& p, const std::string& reason) {
+        const double hold = S().session ? S().session->Config().reconnectHoldS : 0;
+        MC_LOG_INFO("coop: reconnect: player %u '%s' lost the connection (%s); slot held %.0f s", p.id,
+                    p.name.c_str(), reason.c_str(), hold);
+        Notify("CO-OP", p.name + " lost the connection. Waiting for them to reconnect...");
+        GetGameModule().OnPlayerDropped(p.id);
+    };
+    session.onPlayerResumed = [](const net::PlayerInfo& p) {
+        MC_LOG_INFO("coop: reconnect: player %u '%s' is back", p.id, p.name.c_str());
+        LogPlayers();
+        Notify("CO-OP", p.name + " is back");
+    };
+    session.onConnectionLost = [](const std::string& reason) {
+        State& st = S();
+        MC_LOG_WARN("coop: reconnect: %s; rejoining %s for up to %.0f s", reason.c_str(),
+                    st.hostName.empty() ? st.target.c_str() : st.hostName.c_str(),
+                    st.session ? st.session->Config().reconnectWindowS : 0.0);
+        st.lobbyRejoinAt = st.now + 5.0;  // Steam: give P2P a moment before re-entering the lobby
+        Notify("CO-OP", "Connection to " + (st.hostName.empty() ? std::string("the host") : st.hostName) +
+                            " lost. Reconnecting...",
+               true);
+        GetGameModule().OnConnectionLost();
+    };
+    session.onReconnected = [](bool sameSlot) {
+        State& st = S();
+        MC_LOG_INFO("coop: reconnect: back in %s's session as player %u (%s), %d attempt(s)", st.hostName.c_str(),
+                    st.session->LocalId(), sameSlot ? "same slot" : "new slot", st.session->ReconnectAttempts());
+        LogPlayers();
+        Notify("CO-OP", "Reconnected to " + (st.hostName.empty() ? std::string("the host") : st.hostName) + "'s game");
+        GetGameModule().OnReconnected(sameSlot);
     };
     session.onChat = [](net::PlayerId from, const std::string& text) {
         MC_LOG_INFO("coop: chat from %u: %s", from, text.c_str());
@@ -676,6 +712,15 @@ void Coop::Tick(float dt) {
     if (!s.started) TryStart();
     if (s.shutDown) return;
     if (s.session) s.session->Poll();
+    // Reconnecting over Steam: if our lost connection also took us out of the host's Steam lobby (his accept filter
+    // only lets lobby members in), enter it again; the session keeps retrying the P2P connection meanwhile.
+    if (s.session && s.session->IsReconnecting() && s.mode == Mode::JoinLobby && s.steam == SteamState::Ready &&
+        s.lobby.GetState() == net::SteamLobby::State::Idle && s.now >= s.lobbyRejoinAt) {
+        s.lobbyRejoinAt = s.now + 10.0;
+        MC_LOG_INFO("coop: reconnect: not in Steam lobby %llu any more; entering it again",
+                    static_cast<unsigned long long>(s.lobbyId));
+        s.lobby.Join(s.lobbyId);
+    }
     if (s.session && s.session->IsActive()) {
         if (s.session->IsHost()) s.gameLobby.SetInGame(GetGameModule().InWorld(), GetGameModule().CurrentMode());
         s.gameLobby.Tick();
@@ -999,6 +1044,12 @@ Coop::Info Coop::GetInfo() {
         switch (session.State()) {
         case net::SessionState::Hosting: info.phase = Phase::Hosting; break;
         case net::SessionState::Connected: info.phase = Phase::Connected; break;
+        case net::SessionState::Reconnecting:  // still in the session (LEAVE CO-OP ends the retries)
+            info.phase = Phase::Connected;
+            info.reconnecting = true;
+            info.reconnectLeftS = static_cast<int>(session.ReconnectLeftS() + 0.999);
+            if (!s.hostName.empty()) info.target = s.hostName;
+            break;
         default: info.phase = Phase::Joining; break;
         }
         if (info.phase == Phase::Hosting) {
@@ -1065,6 +1116,14 @@ void Coop::GetStatus(std::vector<render::OverlayLine>& out) {
         case net::SessionState::Connecting:
             out.push_back({"Co-op: connecting to " + s.target + "...", kColWarn});
             break;
+        case net::SessionState::Reconnecting: {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "Co-op: connection to %s lost - reconnecting (attempt %d, %.0f s left)",
+                          s.hostName.empty() ? s.target.c_str() : s.hostName.c_str(), session.ReconnectAttempts(),
+                          session.ReconnectLeftS());
+            out.push_back({buf, kColWarn});
+            break;
+        }
         case net::SessionState::Connected: {
             const net::PlayerInfo* host = session.FindPlayer(net::kHostPlayer);
             out.push_back({"Co-op: connected to " + (host ? host->name : s.target) + " \xE2\x80\x94 " +

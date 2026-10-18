@@ -31,6 +31,17 @@ struct PlayerInfo {
     std::string model;           // character the player appears as (spawn profile; "" = default for his id)
     PeerId peer = kInvalidPeer;  // host: transport peer of that guest; guest: host's peer for id 0, else 0
     float rttMs = 0;             // to the host (host's own entry: 0)
+    // Counts this player's (re)entries into Players() as seen here (every join and every resume after a lost
+    // connection gets a new, larger number). Games that diff Players() to find newcomers key by (id, joinSeq)
+    // so a player who dropped and came back within one Poll is still seen as new.
+    uint32_t joinSeq = 0;
+};
+
+// A player whose connection was lost (not a clean leave, kick or ban) and who may still come back (docs/protocol.md
+// "Reconnect"). Not in Players() meanwhile; his id stays reserved.
+struct DroppedPlayer {
+    PlayerInfo info;
+    double leftS = 0;  // seconds left until the slot is given up (as known here)
 };
 
 struct SessionConfig {
@@ -63,6 +74,18 @@ struct SessionConfig {
     double relayBytesPerS = 1024.0 * 1024;   // relayed app payload bytes per second
     double relayBurstBytes = 2048.0 * 1024;  // relayed app payload bytes at once (one larger message still passes
                                              // when the bucket is full; it then has to refill)
+
+    // Reconnect after a lost connection (docs/protocol.md "Reconnect").
+    // Host: a guest whose transport timed out / failed (not a clean leave, kick or ban) keeps his slot this long; he
+    // is out of Players() meanwhile (others get PeerDropped) and comes back with the same id when he rejoins with his
+    // resume token. <= 0: lost guests leave at once.
+    double reconnectHoldS = 60.0;
+    // Guest: after losing the host (timeout / transport error, not "host closed the session" or a kick), keep the
+    // session and rejoin the same address with backoff for this long. <= 0: fail at once.
+    double reconnectWindowS = 60.0;
+    double reconnectFirstDelayS = 0.5;  // first retry after this long, doubled per attempt ...
+    double reconnectMaxDelayS = 5.0;    // ... up to this
+    double reconnectAttemptS = 8.0;     // one attempt (transport connect + handshake) gives up after this long
 };
 
 // Traffic of one app message id since Host()/Join() (docs/protocol.md "Traffic statistics"). Bytes are what the
@@ -101,7 +124,12 @@ struct BanEntry {
     uint64_t steamId = 0;  // Steam: SteamID64 (0 = the peer did not come over Steam)
 };
 
-enum class SessionState { Idle, Hosting, Connecting, Connected, Disconnected };
+// Reconnecting (guest): the connection to the host was lost and the session retries the join; Players()
+// holds only us, nothing can be sent (IsActive() false), LocalId() is kept.
+enum class SessionState { Idle, Hosting, Connecting, Connected, Disconnected, Reconnecting };
+
+constexpr size_t kResumeTokenSize = 16;
+using ResumeToken = std::array<uint8_t, kResumeTokenSize>;
 
 class Session {
 public:
@@ -134,6 +162,17 @@ public:
     SessionState State() const { return state_; }
     bool IsHost() const { return state_ == SessionState::Hosting; }
     bool IsActive() const { return state_ == SessionState::Hosting || state_ == SessionState::Connected; }
+    // ---- reconnect (docs/protocol.md "Reconnect") ----
+    // Guest: the connection to the host was lost and the session is rejoining it.
+    bool IsReconnecting() const { return state_ == SessionState::Reconnecting; }
+    double ReconnectLeftS() const;   // guest: seconds left before it gives up (0 when not reconnecting)
+    int ReconnectAttempts() const { return reconnectAttempts_; }  // guest: attempts started in this reconnect
+    const std::string& ReconnectReason() const { return reconnectReason_; }  // guest: why the connection was lost
+    // Players who lost their connection and whose slot is held (host: its holds; guest: what the host announced).
+    std::vector<DroppedPlayer> DroppedPlayers() const;
+    // Guest: the secret the host gave us in the Welcome (sent back in the Hello of a reconnect). Tests only; never log.
+    const ResumeToken& CurrentResumeToken() const { return resumeToken_; }
+    bool HasResumeToken() const { return hasResumeToken_; }
     PlayerId LocalId() const { return localId_; }
     const std::vector<PlayerInfo>& Players() const { return players_; }
     const PlayerInfo* FindPlayer(PlayerId id) const;
@@ -181,6 +220,16 @@ public:
     std::function<void(const PlayerInfo&, const std::string& reason)> onPlayerLeft;
     std::function<void(PlayerId from, const std::string& text)> onChat;
     std::function<void(const std::string& reason)> onDisconnected;  // guest: lost/rejected/kicked; host: never
+    // Reconnect. Host and guests: a player lost his connection; he left Players(), his slot is held
+    // (onPlayerLeft follows if he does not come back in time).
+    std::function<void(const PlayerInfo&, const std::string& reason)> onPlayerDropped;
+    // Host and guests: a dropped player is back (same id). Without a handler, onPlayerJoined is called instead.
+    std::function<void(const PlayerInfo&)> onPlayerResumed;
+    // Guest: the connection to the host was lost; the session now retries (IsReconnecting). Players() holds only us.
+    std::function<void(const std::string& reason)> onConnectionLost;
+    // Guest: back in the host's session. sameSlot: the host still held our slot (same id, LocalId unchanged); false:
+    // it had given it up and we joined as a new player (LocalId may differ). Players() is the host's list again.
+    std::function<void(bool sameSlot)> onReconnected;
 
 private:
     struct Pending {  // host: connected transport peer that has not completed the handshake
@@ -217,7 +266,26 @@ private:
     void GuestOnMessage(ByteReader& r);
     void HostOnHello(PeerId peer, ByteReader& r);
     void HostOnAuth(PeerId peer, ByteReader& r);
-    void HostAdmit(PeerId peer, const std::string& name, const std::string& model);
+    // Host: a guest's secrets, kept from the admit until he leaves for good.
+    struct GuestSecret {
+        ResumeToken token{};
+        std::string address;   // Transport::PeerAddress at admit (for a ban while he is held)
+        uint64_t steamId = 0;  // Transport::PeerSteamId at admit
+    };
+    struct Held {  // host: a lost guest whose slot is kept
+        PlayerInfo info;
+        GuestSecret secret;
+        double until = 0;
+    };
+    void HostAdmit(PeerId peer, const std::string& name, const std::string& model, const Held* resume = nullptr);
+    void HostHoldPlayer(PeerId peer, const std::string& reason);
+    void HostExpireHolds(double now);
+    bool HostTryResume(PeerId peer, const ResumeToken& token, const std::string& name, const std::string& model);
+    void SendHello();
+    void GuestStartReconnect(const std::string& reason);
+    void GuestReconnectPoll(double now);
+    void GuestAttemptFailed(const char* why);
+    void GuestOnWelcome(ByteReader& r);
     std::string AttemptKey(PeerId peer) const;
     bool LockedOut(const std::string& key, double now);
     void Reject(PeerId peer, uint8_t code, const std::string& reason);
@@ -256,6 +324,19 @@ private:
     bool welcomed_ = false;
     std::vector<BanEntry> bans_;  // host: this hosted session's ban list
     uint8_t kicked_ = 0;          // guest: 0, 1 kicked, 2 kicked and banned (from the Kicked message)
+
+    // reconnect (docs/protocol.md "Reconnect")
+    uint32_t joinCounter_ = 0;                            // source of PlayerInfo::joinSeq
+    std::unordered_map<PlayerId, GuestSecret> secrets_;   // host: per admitted guest
+    std::vector<Held> held_;                              // host: lost guests whose slot is kept
+    std::vector<std::pair<PlayerInfo, double>> droppedOthers_;  // guest: other players the host announced lost (until)
+    ResumeToken resumeToken_{};                           // guest: from the last Welcome
+    bool hasResumeToken_ = false;
+    std::string reconnectReason_;
+    double reconnectUntil_ = 0, reconnectNextAt_ = 0, reconnectDelay_ = 0, attemptStartedAt_ = 0;
+    int reconnectAttempts_ = 0;
+    bool attemptOpen_ = false;
+    PlayerId reconnectOldId_ = kNoPlayer;
 };
 
 }  // namespace mc::net

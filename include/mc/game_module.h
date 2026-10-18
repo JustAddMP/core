@@ -69,8 +69,18 @@ public:
     virtual void OnSessionStart(net::Session& session) = 0;
     virtual void OnSessionEnd() = 0;
     virtual void OnPlayerLeft(net::PlayerId id) = 0;
-    // Every frame while a session exists, after Session::Poll.
+    // Every frame while a session exists, after Session::Poll (also while a guest is reconnecting).
     virtual void SessionTick(float dt) = 0;
+
+    // ---- reconnect (docs/protocol.md "Reconnect") ----
+    // Host and guests: a player lost his connection; his slot is held while he tries to come back (he is out of
+    // Players() meanwhile). Default: as if he left (remove his puppet); OnPlayerLeft follows if he does not return.
+    virtual void OnPlayerDropped(net::PlayerId id) { OnPlayerLeft(id); }
+    // Guest: the connection to the host was lost; the session stays and rejoins the same host
+    // (Session::IsReconnecting, ReconnectLeftS). Keep the game running; the other players are out of Players().
+    virtual void OnConnectionLost() {}
+    // Guest: back in the host's session (sameSlot: same player id as before). The host re-sends what a newcomer gets.
+    virtual void OnReconnected(bool /*sameSlot*/) {}
 
     // ---- co-op UI ----
     virtual int PlayerHealth(net::PlayerId) { return -1; }        // 0..100 for the players panel, -1 = unknown
