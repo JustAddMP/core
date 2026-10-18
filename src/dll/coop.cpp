@@ -329,6 +329,7 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     cfg.invitesSkipPassword = !s.requireInvitePassword;
     cfg.relayBytesPerS = BudgetBytesPerS();
     cfg.relayBurstBytes = 2 * cfg.relayBytesPerS;
+    cfg.sendBudgetBytesPerS = BudgetBytesPerS();  // per peer; lowered while the link is congested (Send priorities)
     s.net = std::move(transport);
     s.logMon.Reset();
     s.overlayMon.Reset();

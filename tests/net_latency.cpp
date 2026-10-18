@@ -528,6 +528,8 @@ void TestRelayAge() {
     b.session.Join(addr);
     std::vector<double> atHost, atB;
     bool hostOwnZero = true;
+    int observed = 0;
+    b.session.onAppMessage = [&](uint16_t id, PlayerId) { observed += id == kMsgRelay && b.session.MessageAgeMs() >= 0; };
     host.session.On(kMsgRelay, [&](PlayerId from, ByteReader&) {
         if (from == kHostPlayer) hostOwnZero &= host.session.MessageAgeMs() == 0;
         else if (host.session.MessageAgeMs() >= 0) atHost.push_back(host.session.MessageAgeMs());
@@ -553,6 +555,105 @@ void TestRelayAge() {
     const double h50 = Pct(atHost, 0.5), b50 = Pct(atB, 0.5);
     Check(atHost.size() > 10 && atB.size() > 10 && h50 > 8 && h50 < 14 && b50 > 18 && b50 < 26 && hostOwnZero,
           "relay: age covers both hops", Fmt("host p50 %.1f ms, other guest p50 %.1f ms (10 ms per hop)", h50, b50));
+    Check(observed > 0 && observed >= static_cast<int>(atB.size()), "onAppMessage: sees every message with its age",
+          Fmt("%d", observed));
+}
+
+constexpr uint16_t kMsgCrit = 0x7501, kMsgEvt = 0x7502, kMsgBulkU = 0x7601, kMsgBulkR = 0x7602, kMsgEvtSameLane = 0x7603;
+
+// A guest over its budget (64 KB/s): critical states and events go at once, bulk states are thinned to what fits,
+// bulk reliable messages are deferred (all arrive, in order), a normal message on the bulk lane queues behind them.
+void TestPriorities() {
+    std::printf("-- send priorities against the budget\n");
+    SessionConfig cfg;
+    cfg.sendBudgetBytesPerS = 64 * 1024;
+    cfg.sendBudgetMinBytesPerS = 64 * 1024;
+    Node host("host", cfg), guest("guest", cfg);
+    for (Session* s : {&host.session, &guest.session}) {
+        s->SetPriority(0x7500, 0x75FF, Priority::Critical);
+        s->SetPriority(0x7600, 0x76FF, Priority::Bulk);
+        s->SetLane(0x7600, 0x76FF, 3);
+    }
+    for (Session* s : {&host.session, &guest.session}) s->SetPriority(kMsgEvtSameLane, kMsgEvtSameLane, Priority::Normal);
+    int crit = 0, bulkU = 0;
+    std::vector<uint32_t> bulkR, sameLane;
+    std::vector<double> evtDelay, critDelay;
+    host.session.On(kMsgCrit, [&](PlayerId, ByteReader& r) {
+        ++crit;
+        critDelay.push_back((Seconds() - r.F64()) * 1000);
+    });
+    host.session.On(kMsgEvt, [&](PlayerId, ByteReader& r) { evtDelay.push_back((Seconds() - r.F64()) * 1000); });
+    host.session.On(kMsgBulkU, [&](PlayerId, ByteReader&) { ++bulkU; });
+    host.session.On(kMsgBulkR, [&](PlayerId, ByteReader& r) { bulkR.push_back(r.U32()); });
+    host.session.On(kMsgEvtSameLane, [&](PlayerId, ByteReader& r) { sameLane.push_back(r.U32()); });
+    if (!Connect(host, guest)) {
+        Check(false, "priorities: connect");
+        return;
+    }
+    const double frame = 1 / 60.0, t0 = Seconds();
+    double next = t0;
+    int sentCrit = 0, sentBulkU = 0, evts = 0;
+    uint32_t sentBulkR = 0;
+    std::vector<uint8_t> pad(900, 0x11);
+    for (int f = 0; f < 180; ++f) {  // 3 s: ~60 KB/s critical + 270 KB/s bulk states + 120 KB/s bulk reliable
+        ByteWriter c(600);
+        c.F64(Seconds());
+        c.Bytes(pad.data(), 500);
+        guest.session.SendToHost(kMsgCrit, c.Span(), Reliability::Unreliable);
+        ++sentCrit;
+        for (int k = 0; k < 5; ++k) {
+            guest.session.SendToHost(kMsgBulkU, pad, Reliability::Unreliable);
+            ++sentBulkU;
+        }
+        if (f % 2 == 0) {
+            ByteWriter b(4100);
+            b.U32(sentBulkR++);
+            std::vector<uint8_t> big(4000, 0x22);
+            b.Bytes(big.data(), big.size());
+            guest.session.SendToHost(kMsgBulkR, b.Span(), Reliability::Reliable);
+        }
+        if (f % 10 == 0) {
+            ByteWriter e(16);
+            e.F64(Seconds());
+            guest.session.SendToHost(kMsgEvt, e.Span(), Reliability::Reliable);
+            ByteWriter s(8);
+            s.U32(static_cast<uint32_t>(evts++));
+            guest.session.SendToHost(kMsgEvtSameLane, s.Span(), Reliability::Reliable);
+        }
+        guest.session.Flush();
+        next += frame;
+        while (Seconds() < next) {
+            host.session.Poll();
+            guest.session.Poll();
+            SpinUntil(std::min(next, Seconds() + 0.0005));
+        }
+    }
+    const double sendEnd = Seconds();
+    const double until = Seconds() + 15;
+    while (Seconds() < until && (bulkR.size() < sentBulkR || static_cast<int>(sameLane.size()) < evts)) {
+        host.session.Poll();
+        guest.session.Poll();
+        guest.session.Flush();
+        Sleep(1);
+    }
+    bool ordered = true;
+    for (size_t i = 0; i < bulkR.size(); ++i) ordered &= bulkR[i] == i;
+    for (size_t i = 0; i < sameLane.size(); ++i) ordered &= sameLane[i] == i;
+    const auto& tr = guest.session.Traffic();
+    auto T = [&](uint16_t id) { return tr.count(id) ? tr.at(id) : MsgTraffic{}; };
+    Check(crit == sentCrit && Pct(critDelay, 0.95) < 5, "priorities: critical states all go, at once",
+          Fmt("%d / %d, p95 %.2f ms", crit, sentCrit, Pct(critDelay, 0.95)));
+    Check(static_cast<int>(evtDelay.size()) == evts && Pct(evtDelay, 0.95) < 5, "priorities: normal events at once",
+          Fmt("%zu / %d, p95 %.2f ms", evtDelay.size(), evts, Pct(evtDelay, 0.95)));
+    const double bulkRate = bulkU * 900.0 / (sendEnd - t0) / 1024;
+    Check(bulkU < sentBulkU / 2 && bulkU > 0 && T(kMsgBulkU).thinned > 0, "priorities: bulk states thinned first",
+          Fmt("%d / %d arrived (%.0f KB/s), thinned %llu", bulkU, sentBulkU, bulkRate,
+              static_cast<unsigned long long>(T(kMsgBulkU).thinned)));
+    Check(bulkR.size() == sentBulkR && sameLane.size() == static_cast<size_t>(evts) && ordered &&
+              T(kMsgBulkR).deferred > 0,
+          "priorities: bulk reliable deferred, all arrive in lane order",
+          Fmt("%zu / %u bulk, %zu / %d on its lane, deferred %llu, %.1f s after the end", bulkR.size(), sentBulkR,
+              sameLane.size(), evts, static_cast<unsigned long long>(T(kMsgBulkR).deferred), Seconds() - sendEnd));
 }
 
 }  // namespace
@@ -568,6 +669,7 @@ int main(int argc, char** argv) {
     TestLanes();
     TestClock();
     TestRelayAge();
+    TestPriorities();
     timeEndPeriod(1);
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

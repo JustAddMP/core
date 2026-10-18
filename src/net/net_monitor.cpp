@@ -109,6 +109,7 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
         double out, in, relay, outN, inN;
         uint64_t failed;
         double ageMs;  // mean age at arrival over the interval (-1 none stamped)
+        uint64_t thinned = 0, deferred = 0;
     };
     std::vector<Row> rows;
     for (const auto& [id, t] : traffic) {
@@ -123,8 +124,10 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
               Delta(t.sendFailed, prev.sendFailed), -1};
         const uint64_t aged = Delta(t.agedMsgs, prev.agedMsgs);
         if (aged > 0) r.ageMs = (t.ageSumMs - prev.ageSumMs) / static_cast<double>(aged);
+        r.thinned = Delta(t.thinned, prev.thinned);
+        r.deferred = Delta(t.deferred, prev.deferred);
         totals_.sendFailed += r.failed;
-        if (r.out > 0 || r.in > 0 || r.relay > 0 || r.failed) rows.push_back(r);
+        if (r.out > 0 || r.in > 0 || r.relay > 0 || r.failed || r.thinned || r.deferred) rows.push_back(r);
     }
     traffic_ = traffic;
     std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
@@ -137,9 +140,18 @@ bool NetMonitor::Sample(Session& session, double now, double interval) {
                     r.out / 1024, r.outN, r.in / 1024, r.inN);
         if (r.relay > 0) msgs += Fmt(", relayed %.2f KB/s", r.relay / 1024);
         if (r.ageMs >= 0) msgs += Fmt(", age %.1f ms", r.ageMs);
+        if (r.thinned) msgs += Fmt(", thinned %llu", static_cast<unsigned long long>(r.thinned));
+        if (r.deferred) msgs += Fmt(", deferred %llu", static_cast<unsigned long long>(r.deferred));
         if (r.failed) msgs += Fmt(", FAILED %llu", static_cast<unsigned long long>(r.failed));
     }
     if (!msgs.empty()) log_.push_back("net: messages: " + msgs);
+    for (const auto& p : session.Players()) {
+        if (p.id == session.LocalId() || !p.peer || session.Config().sendBudgetBytesPerS <= 0) continue;
+        const double b = session.SendBudget(p.id);
+        if (b < session.Config().sendBudgetBytesPerS || session.DeferredBytes(p.id))
+            log_.push_back(Fmt("net: send budget to %s: %.0f KB/s (link congested), %zu bytes deferred", p.name.c_str(),
+                               b / 1024, session.DeferredBytes(p.id)));
+    }
     if (!session.IsHost() && session.ClockSynced())
         log_.push_back(Fmt("net: clock offset to the host %.1f ms (+-%.1f ms)", session.ClockOffsetS() * 1000,
                            session.ClockErrorMs()));

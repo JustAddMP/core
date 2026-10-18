@@ -27,6 +27,12 @@ constexpr PlayerId kNoPlayer = 0xFE;
 constexpr PlayerId kAllPlayers = 0xFF;
 constexpr int kMaxPlayers = 4;
 
+// Send priority of an app message (Session::SetPriority; docs/protocol.md "Send priorities"). Every peer has a send
+// budget (SessionConfig::sendBudgetBytesPerS, lowered while the link shows loss or a growing queue); when it is used
+// up, Bulk goes first (unreliable: thinned, i.e. this one is not sent, the next state replaces it; reliable: deferred
+// until the budget allows), then unreliable Normal (thinned only when far over). Critical always goes at once.
+enum class Priority : uint8_t { Critical = 0, Normal = 1, Bulk = 2 };
+
 struct PlayerInfo {
     PlayerId id = kNoPlayer;
     std::string name;
@@ -76,6 +82,12 @@ struct SessionConfig {
     double relayBytesPerS = 1024.0 * 1024;   // relayed app payload bytes per second
     double relayBurstBytes = 2048.0 * 1024;  // relayed app payload bytes at once (one larger message still passes
                                              // when the bucket is full; it then has to refill)
+    // Send budget per peer (bytes/s of app messages we send it, docs/protocol.md "Send priorities"). The effective
+    // budget follows the link: cut by 30 % every 0.5 s while it shows loss over 10 % or a reliable queue over 64
+    // units, grown back by 10 % otherwise (at least sendBudgetMinBytesPerS). <= 0: no budget (nothing thinned).
+    double sendBudgetBytesPerS = 1024.0 * 1024;
+    double sendBudgetMinBytesPerS = 48.0 * 1024;
+    double sendBurstS = 0.1;  // budget seconds that may go out at once
 
     // Reconnect after a lost connection (docs/protocol.md "Reconnect").
     // Host: a guest whose transport timed out / failed (not a clean leave, kick or ban) keeps his slot this long; he
@@ -101,6 +113,8 @@ struct MsgTraffic {
     uint64_t recvMsgs = 0, recvBytes = 0;        // received from the network (not local loopback)
     uint64_t relayedMsgs = 0, relayedBytes = 0;  // host: forwarded from one guest to the others
     uint64_t sendFailed = 0;                     // the transport refused it (too large, queue full, peer gone)
+    uint64_t thinned = 0;                        // unreliable copies not sent: over the send budget (priority)
+    uint64_t deferred = 0;                       // reliable copies that waited for the send budget (priority)
     // Age at arrival (send stamp -> handler, on the session clock) of the received messages that carried a stamp
     uint64_t agedMsgs = 0;
     double ageSumMs = 0;
@@ -179,6 +193,12 @@ public:
     // Set it on host and guests alike (OnSessionStart); it is not sent anywhere. Later calls win for overlaps.
     void SetLane(uint16_t firstMsg, uint16_t lastMsg, uint8_t lane);
     uint8_t LaneOf(uint16_t msgId) const;
+    // App messages with an id in [firstMsg, lastMsg] have this send priority (default Normal; later calls win).
+    void SetPriority(uint16_t firstMsg, uint16_t lastMsg, Priority p);
+    Priority PriorityOf(uint16_t msgId) const;
+    // A peer's current effective send budget (bytes/s; 0 = unknown peer or no budget) and deferred bytes waiting.
+    double SendBudget(PlayerId player) const;
+    size_t DeferredBytes(PlayerId player) const;
 
     // Inside an app handler: how long ago (ms, session clock) the sender sent this message: its send stamp, kept
     // through the host's relay, against SessionTime() here. -1 when unknown (not stamped: the sender's clock was not
@@ -261,6 +281,9 @@ public:
     std::function<void(const PlayerInfo&, const std::string& reason)> onPlayerLeft;
     std::function<void(PlayerId from, const std::string& text)> onChat;
     std::function<void(const std::string& reason)> onDisconnected;  // guest: lost/rejected/kicked; host: never
+    // Every app message from another player right before its handler (also without one); MessageAgeMs() is valid
+    // inside. For per-message statistics (e.g. a game's latency trace).
+    std::function<void(uint16_t msgId, PlayerId from)> onAppMessage;
     // Reconnect. Host and guests: a player lost his connection; he left Players(), his slot is held
     // (onPlayerLeft follows if he does not come back in time).
     std::function<void(const PlayerInfo&, const std::string& reason)> onPlayerDropped;
@@ -336,7 +359,11 @@ private:
     void DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload, bool stamped = false,
                      uint32_t stampMs = 0);
     bool SendRaw(PeerId peer, const ByteWriter& w, Reliability rel, uint8_t lane = 0);
-    bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane = 0);  // false if any failed
+    // appId >= 0: an app message (lane and send priority by its id)
+    bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane = 0,
+                      int appId = -1);  // false if any failed
+    bool SendApp(PeerId peer, const ByteWriter& w, Reliability rel, uint16_t appId);
+    void ReleaseDeferred(double now);
     double LocalClock() const;
     void SendPing(double now);
     void OnPong(ByteReader& r, PlayerInfo* from);
@@ -392,6 +419,28 @@ private:
         uint8_t lane;
     };
     std::vector<LaneRange> lanes_;
+    // send priorities and budgets (docs/protocol.md "Send priorities")
+    struct PrioRange {
+        uint16_t first, last;
+        Priority prio;
+    };
+    std::vector<PrioRange> prios_;
+    struct DeferredMsg {
+        std::vector<uint8_t> bytes;
+        uint16_t appId;
+        uint8_t lane;
+        Priority prio;
+    };
+    struct PeerBudget {
+        bool started = false;
+        double tokens = 0, last = 0, eff = 0, lastAdapt = 0;
+        std::vector<DeferredMsg> deferred;  // in send order
+        size_t deferredBytes = 0;
+        uint32_t laneDeferred[kLanes] = {};  // deferred messages per lane (later ones of that lane queue behind)
+    };
+    std::unordered_map<PeerId, PeerBudget> budgets_;
+    PeerBudget& Budget(PeerId peer, double now);
+    double lastBudgetLog_ = -1e9;
     // pings and the session clock
     std::array<std::pair<uint32_t, double>, 16> pingSent_{};  // (wire stamp, exact local send time)
     int pingBurst_ = 0;                                         // quick pings left (clock sync after a join)

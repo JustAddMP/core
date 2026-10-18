@@ -305,6 +305,30 @@ protocol 8 sent. Steam:
 lane k's reliable data goes on P2P channel 7 + k; all channels are read every Poll (UNVERIFIED whether Steam orders
 reliable packets per channel; if it does not, lanes simply give no gain there).
 
+### Send priorities
+
+Small events must go at once, continuous state must keep flowing, and when the link cannot carry everything the
+bulk gives way first. `Session::SetPriority(firstMsg, lastMsg, Priority)` gives app message ids a priority
+(`Critical`, `Normal` = default, `Bulk`); every peer we send to has a token bucket at its send budget
+(`SessionConfig::sendBudgetBytesPerS`, the dll sets it to `net_budget_kbps`, default 1024 KiB/s; burst
+`sendBurstS` 0.1 s of it). The effective budget follows the link: every 0.5 s it is cut by 30 % while the transport
+shows over 10 % loss or over 64 unacknowledged reliable units, and grows back by 10 % + 4 KB/s otherwise (never
+below `sendBudgetMinBytesPerS`, 48 KiB/s). Every message costs its size; then:
+
+| Priority | Unreliable | Reliable |
+|---|---|---|
+| Critical | always sent at once | always sent at once |
+| Normal | sent; thinned (not sent) only when the bucket is a whole burst in debt | sent at once |
+| Bulk | thinned when the bucket is empty (the next state of the stream replaces it) | deferred while the bucket is empty, sent in order as it refills (from Poll / Flush) |
+
+A reliable message behind a deferred one of its lane waits behind it, whatever its priority (lane order holds).
+The debt is capped at one second of budget. `MsgTraffic::thinned / deferred` count it per message id; NetMonitor
+prints `thinned N` / `deferred N` per message and `net: send budget to <player>: N KB/s (link congested), N bytes
+deferred` while it is below the setting. Host relay copies go through the budget of the peer they go to.
+Measured (`net_latency`, 64 KiB/s budget, 3 s at ~450 KB/s demand): critical states 180/180 at once (p95 0.1 ms),
+normal events 18/18 at once, bulk states thinned 895/900, 90 bulk reliable messages all delivered in order (the
+last 3.9 s after the burst), the normal messages on their lane in order behind them.
+
 ### Session clock
 
 Every game can read the host's clock: `Session::SessionTime()` (seconds; `SessionTimeMs()` for a u32 wire stamp).

@@ -139,6 +139,7 @@ void Session::Reset() {
     reconnectOldId_ = kNoPlayer;
     pingSent_ = {};
     pingBurst_ = 0;
+    budgets_.clear();
     clockSamples_ = {};
     clockNext_ = 0;
     clockSynced_ = false;
@@ -261,6 +262,14 @@ void Session::Poll() {
     }
 
     bool sent = false;
+    if (!budgets_.empty()) {
+        for (auto it = budgets_.begin(); it != budgets_.end();) {  // peers that are gone
+            bool known = false;
+            for (const auto& p : players_) known |= p.peer == it->first;
+            it = known ? std::next(it) : budgets_.erase(it);
+        }
+        ReleaseDeferred(now);
+    }
     if (now - lastPing_ >= (pingBurst_ > 0 ? kPingBurstInterval : cfg_.pingIntervalS)) {
         lastPing_ = now;
         SendPing(now);
@@ -289,12 +298,112 @@ void Session::Poll() {
 
 void Session::Flush() {
     if (state_ == SessionState::Idle || state_ == SessionState::Disconnected) return;
+    ReleaseDeferred(Now());
     transport_.Flush();
 }
 
 void Session::SetLane(uint16_t firstMsg, uint16_t lastMsg, uint8_t lane) {
     if (lastMsg < firstMsg) std::swap(firstMsg, lastMsg);
     lanes_.push_back({firstMsg, lastMsg, static_cast<uint8_t>(lane < kLanes ? lane : 0)});
+}
+
+void Session::SetPriority(uint16_t firstMsg, uint16_t lastMsg, Priority p) {
+    if (lastMsg < firstMsg) std::swap(firstMsg, lastMsg);
+    prios_.push_back({firstMsg, lastMsg, p});
+}
+
+Priority Session::PriorityOf(uint16_t msgId) const {
+    for (auto it = prios_.rbegin(); it != prios_.rend(); ++it)
+        if (msgId >= it->first && msgId <= it->last) return it->prio;
+    return Priority::Normal;
+}
+
+double Session::SendBudget(PlayerId player) const {
+    const PlayerInfo* p = FindPlayer(player);
+    if (!p || !p->peer || cfg_.sendBudgetBytesPerS <= 0) return 0;
+    auto it = budgets_.find(p->peer);
+    return it == budgets_.end() ? cfg_.sendBudgetBytesPerS : it->second.eff;
+}
+
+size_t Session::DeferredBytes(PlayerId player) const {
+    const PlayerInfo* p = FindPlayer(player);
+    if (!p || !p->peer) return 0;
+    auto it = budgets_.find(p->peer);
+    return it == budgets_.end() ? 0 : it->second.deferredBytes;
+}
+
+// The peer's token bucket, refilled to now, its effective rate adapted to the link every 0.5 s.
+Session::PeerBudget& Session::Budget(PeerId peer, double now) {
+    PeerBudget& b = budgets_[peer];
+    const double cap = std::max(cfg_.sendBudgetBytesPerS, 1.0);
+    const double floor = std::min(cap, std::max(cfg_.sendBudgetMinBytesPerS, 1.0));
+    if (!b.started) {
+        b.started = true;
+        b.eff = cap;
+        b.tokens = cap * cfg_.sendBurstS;
+        b.last = b.lastAdapt = now;
+    }
+    if (now - b.lastAdapt >= 0.5) {
+        b.lastAdapt = now;
+        PeerStats st;
+        const bool congested = transport_.GetStats(peer, st) && (st.loss > 0.10f || st.reliableQueued > 64);
+        const double before = b.eff;
+        b.eff = congested ? std::max(floor, b.eff * 0.7) : std::min(cap, b.eff * 1.1 + 4096);
+        if (congested && before > floor && now - lastBudgetLog_ > 5) {
+            lastBudgetLog_ = now;
+            Log(kInfo, "session: peer %llu link congested (loss %.0f %%, %u queued): send budget %.0f KB/s",
+                static_cast<unsigned long long>(peer), st.loss * 100, st.reliableQueued, b.eff / 1024);
+        }
+    }
+    const double burst = b.eff * cfg_.sendBurstS;
+    b.tokens = std::min(burst, b.tokens + (now - b.last) * b.eff);
+    b.last = now;
+    return b;
+}
+
+// An app message to one peer, by its priority against the peer's send budget.
+bool Session::SendApp(PeerId peer, const ByteWriter& w, Reliability rel, uint16_t appId) {
+    if (!peer) return false;
+    const uint8_t lane = LaneOf(appId);
+    if (cfg_.sendBudgetBytesPerS <= 0) return SendRaw(peer, w, rel, lane);
+    const Priority prio = PriorityOf(appId);
+    PeerBudget& b = Budget(peer, Now());
+    const double size = static_cast<double>(w.Size()) + 8;  // + transport overhead (roughly)
+    const double burst = b.eff * cfg_.sendBurstS;
+    if (rel == Reliability::Reliable) {
+        // behind a deferred message of its lane it waits too (lane order), else Bulk waits for the budget
+        if (b.laneDeferred[lane] > 0 || (prio == Priority::Bulk && b.tokens < 0)) {
+            const auto span = w.Span();
+            b.deferred.push_back({std::vector<uint8_t>(span.begin(), span.end()), appId, lane, prio});
+            b.deferredBytes += span.size();
+            ++b.laneDeferred[lane];
+            ++traffic_[appId].deferred;
+            return true;
+        }
+    } else if ((prio == Priority::Bulk && b.tokens < 0) || (prio == Priority::Normal && b.tokens < -burst)) {
+        ++traffic_[appId].thinned;
+        return true;  // thinned: the next state of this stream replaces it
+    }
+    b.tokens = std::max(b.tokens - size, -b.eff);  // at most a second in debt
+    return SendRaw(peer, w, rel, lane);
+}
+
+// Deferred reliable messages go out in order: a Bulk one when the budget has room, others at once.
+void Session::ReleaseDeferred(double now) {
+    for (auto& [peer, b0] : budgets_) {
+        if (b0.deferred.empty()) continue;
+        PeerBudget& b = Budget(peer, now);
+        size_t i = 0;
+        for (; i < b.deferred.size(); ++i) {
+            DeferredMsg& m = b.deferred[i];
+            if (m.prio == Priority::Bulk && b.tokens < 0) break;
+            b.tokens -= static_cast<double>(m.bytes.size()) + 8;
+            if (!transport_.SendOnLane(peer, m.bytes, Reliability::Reliable, m.lane)) ++traffic_[m.appId].sendFailed;
+            b.deferredBytes -= m.bytes.size();
+            --b.laneDeferred[m.lane];
+        }
+        b.deferred.erase(b.deferred.begin(), b.deferred.begin() + static_cast<ptrdiff_t>(i));
+    }
 }
 
 uint8_t Session::LaneOf(uint16_t msgId) const {
@@ -909,12 +1018,12 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
                 int copies = 0, failed = 0;
                 const uint8_t lane = LaneOf(id);
                 if (target == kAllPlayers) {
-                    BroadcastRaw(w, rel, fid, lane);
+                    BroadcastRaw(w, rel, fid, lane, id);
                     copies = lastCopies_;
                     failed = lastFailed_;
                 } else if (PlayerInfo* to = FindMutable(target); to && to->id != kHostPlayer && to->id != fid) {
                     copies = 1;
-                    failed = SendRaw(to->peer, w, rel, lane) ? 0 : 1;
+                    failed = SendApp(to->peer, w, rel, id) ? 0 : 1;
                 }
                 MsgTraffic& t = traffic_[id];
                 t.relayedMsgs += static_cast<uint64_t>(copies - failed);
@@ -1315,13 +1424,16 @@ void Session::DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> p
         t.ageMaxMs = std::max(t.ageMaxMs, age);
     }
     auto it = handlers_.find(id);
-    if (it == handlers_.end()) return;
-    ByteReader r(payload);
+    if (it == handlers_.end() && !onAppMessage) return;
     const float prevAge = curAgeMs_;
     const uint32_t prevStamp = curStampMs_;
     curAgeMs_ = age;
     curStampMs_ = stampMs;
-    it->second(from, r);
+    if (onAppMessage && from != localId_) onAppMessage(id, from);
+    if (it != handlers_.end()) {
+        ByteReader r(payload);
+        it->second(from, r);
+    }
     curAgeMs_ = prevAge;
     curStampMs_ = prevStamp;
 }
@@ -1351,7 +1463,7 @@ bool Session::SendToHost(uint16_t msgId, std::span<const uint8_t> payload, Relia
     if (state_ != SessionState::Connected) return false;
     ByteWriter w = AppHeader(msgId, localId_, kHostPlayer, rel);
     w.Bytes(payload);
-    const bool ok = SendRaw(hostPeer_, w, rel, LaneOf(msgId));
+    const bool ok = SendApp(hostPeer_, w, rel, msgId);
     CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
     return ok;
 }
@@ -1361,11 +1473,11 @@ bool Session::Broadcast(uint16_t msgId, std::span<const uint8_t> payload, Reliab
     ByteWriter w = AppHeader(msgId, localId_, kAllPlayers, rel);
     w.Bytes(payload);
     if (state_ == SessionState::Hosting) {
-        const bool ok = BroadcastRaw(w, rel, kHostPlayer, LaneOf(msgId));
+        const bool ok = BroadcastRaw(w, rel, kHostPlayer, LaneOf(msgId), msgId);
         CountSent(msgId, w.Size(), lastCopies_, lastFailed_);
         return ok;
     }
-    const bool ok = SendRaw(hostPeer_, w, rel, LaneOf(msgId));
+    const bool ok = SendApp(hostPeer_, w, rel, msgId);
     CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
     return ok;
 }
@@ -1381,9 +1493,9 @@ bool Session::SendTo(PlayerId player, uint16_t msgId, std::span<const uint8_t> p
     bool ok;
     if (state_ == SessionState::Hosting) {
         PlayerInfo* p = FindMutable(player);
-        ok = p && SendRaw(p->peer, w, rel, LaneOf(msgId));
+        ok = p && SendApp(p->peer, w, rel, msgId);
     } else {
-        ok = SendRaw(hostPeer_, w, rel, LaneOf(msgId));  // host delivers (player 0) or relays
+        ok = SendApp(hostPeer_, w, rel, msgId);  // host delivers (player 0) or relays
     }
     CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
     return ok;
@@ -1417,14 +1529,15 @@ bool Session::SendRaw(PeerId peer, const ByteWriter& w, Reliability rel, uint8_t
     return transport_.Send(peer, w.Span(), rel);
 }
 
-bool Session::BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane) {
+bool Session::BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane, int appId) {
     lastCopies_ = lastFailed_ = 0;
     size_t limit = rel == Reliability::Reliable ? kMaxReliableMessage : kMaxUnreliableMessage;
     bool ok = true;
     for (auto& p : players_) {
         if (p.id == kHostPlayer || p.id == except) continue;
         ++lastCopies_;
-        const bool sent = w.Size() <= limit && SendRaw(p.peer, w, rel, lane);
+        const bool sent = w.Size() <= limit && (appId >= 0 ? SendApp(p.peer, w, rel, static_cast<uint16_t>(appId))
+                                                            : SendRaw(p.peer, w, rel, lane));
         if (!sent) ++lastFailed_;
         ok &= sent;
     }
