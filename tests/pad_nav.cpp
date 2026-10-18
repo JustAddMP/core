@@ -1,9 +1,12 @@
 // pad_nav: gamepad navigation of the co-op panels (src/dll/pad_nav.h) with made-up pad states: presses only (a held
 // A from the menu does nothing), stick with hysteresis and dominant axis, repeat timing, B / START / BACK = back,
-// several pads combined, a pad that disappears while held. Exits non-zero on any failure.
+// several pads combined, a pad that disappears while held. Also the release guard's held buttons (src/dll/pad_hold.h):
+// a state too old to trust (the game stopped polling the pad) is read again, and an unreadable pad counts as
+// released. Exits non-zero on any failure.
 #include <cstdio>
 #include <string>
 
+#include "dll/pad_hold.h"
 #include "dll/pad_nav.h"
 
 using mc::PadNav;
@@ -128,6 +131,43 @@ int main() {
               "right while down is held: right");
         const int r = Count(n, Buttons(PadNav::kDpadDown | PadNav::kDpadRight), PadNav::kRight, 60, 0.0166f);
         Check(r >= 4, "right repeats", std::to_string(r));
+    }
+    {  // release guard (PadHold): fresh states are trusted, stale held ones read again
+        constexpr uint16_t kMask = PadNav::kA | PadNav::kB;
+        int reads = 0;
+        uint16_t padNow = 0;  // what reading the pad gives now
+        bool readable = true;
+        auto read = [&](int, uint16_t* b) {
+            ++reads;
+            *b = padNow;
+            return readable;
+        };
+        mc::PadHold h;
+        Check(!h.AnyHeld(kMask, 1000, read) && reads == 0, "nothing held: no read");
+        h.Set(0, PadNav::kA, 1000);
+        Check(h.AnyHeld(kMask, 1050, read) && reads == 0, "A held, read 50 ms ago: held, no read");
+        Check(!h.AnyHeld(PadNav::kStart, 5000, read) && reads == 0, "a held button outside the mask: no read");
+        // the game stops polling (loading screen); A was released meanwhile: the guard reads it and lets go
+        Check(!h.AnyHeld(kMask, 1000 + mc::PadHold::kStaleMs + 1, read) && reads == 1 && h.Buttons(0) == 0,
+              "stale A, pad now released: released (one read)", std::to_string(reads));
+        Check(!h.AnyHeld(kMask, 200000, read) && reads == 1, "released stays released, no more reads");
+        // still held on the read: still held, and fresh again until kStaleMs later
+        reads = 0;
+        h.Set(2, PadNav::kB, 10000);
+        padNow = PadNav::kB;
+        Check(h.AnyHeld(kMask, 10500, read) && reads == 1, "stale B, still held on the read: held");
+        Check(h.AnyHeld(kMask, 10550, read) && reads == 1, "re-read state is fresh: no read");
+        // the pad cannot be read any more (unplugged while the game was not polling): released
+        readable = false;
+        Check(!h.AnyHeld(kMask, 20000, read) && reads == 2 && h.Buttons(2) == 0, "stale, unreadable pad: released");
+        // the game's newer read on another thread (time ahead of ours) is trusted
+        reads = 0;
+        readable = true;
+        padNow = 0;
+        h.Set(1, PadNav::kA, 30000);
+        Check(h.AnyHeld(kMask, 29990, read) && reads == 0, "state newer than our clock: trusted");
+        h.Set(9, PadNav::kA, 30000);  // out of range: ignored
+        Check(h.Buttons(9) == 0 && h.Buttons(-1) == 0, "users outside 0-3 ignored");
     }
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;

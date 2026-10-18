@@ -8,7 +8,9 @@
 // until the confirm/back keys and pad buttons are released, so the key that closed our panel does not also act in
 // the game's menu.
 // Gamepads: every XInput user (0-3) counts, not only the first; a pad that is unplugged while a button is held no
-// longer counts as holding it. Each change between blocked and not blocked gives the game a new XInput packet
+// longer counts as holding it. A held state nobody has read for 100 ms (the game stopped polling XInput, e.g. a
+// loading screen) is read again by the guard itself (dll/pad_hold.h), so a button released meanwhile does not keep
+// the keyboard blocked. Each change between blocked and not blocked gives the game a new XInput packet
 // number, so a game that skips unchanged packets still sees the empty (or the real) state. DirectInput joysticks /
 // gamepads, if a game reads any, are blocked with centred POVs, released buttons and their axes frozen where they
 // were (not zeroed: 0 is an axis pushed to its end).

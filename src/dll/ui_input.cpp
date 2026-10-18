@@ -2,6 +2,7 @@
 
 #include "core/hook.h"
 #include "core/log.h"
+#include "dll/pad_hold.h"
 #include "render/overlay.h"
 
 #include <windows.h>
@@ -54,9 +55,10 @@ std::atomic<ULONGLONG> _guardUntil{0};  // keep blocking a little after the keys
 constexpr ULONGLONG kGuardTailMs = 250;
 std::atomic<HWND> _hwnd{nullptr};
 // Buttons held per XInput user, from the game's reads and ours (0 when the read failed: unplugged). The release guard
-// waits for all of them.
-constexpr DWORD kUsers = 4;  // XUSER_MAX_COUNT
-std::atomic<uint16_t> _pad[kUsers] = {};
+// waits for all of them; a state too old to trust (the game stopped polling XInput) it reads again (dll/pad_hold.h).
+constexpr DWORD kUsers = PadHold::kUsers;
+PadHold _pads;
+DWORD ReadPad(DWORD user, XINPUT_STATE* state);
 // Changes whenever blocking starts or ends: added to the XInput packet number the game sees, so it never skips the
 // switch to the empty state (or back) as "unchanged".
 std::atomic<DWORD> _blockEpoch{0};
@@ -104,9 +106,13 @@ bool AnyHeld() {
     constexpr WORD kPanelButtons = XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_X | XINPUT_GAMEPAD_Y |
                                    XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_LEFT_SHOULDER |
                                    XINPUT_GAMEPAD_RIGHT_SHOULDER;
-    for (const auto& p : _pad)
-        if (p.load() & kPanelButtons) return true;
-    return false;
+    return _pads.AnyHeld(kPanelButtons, GetTickCount64(), [](int user, uint16_t* buttons) {
+        if (!_origXInput) return false;
+        XINPUT_STATE st{};
+        if (ReadPad(static_cast<DWORD>(user), &st) != ERROR_SUCCESS) return false;
+        *buttons = st.Gamepad.wButtons;
+        return true;
+    });
 }
 
 bool BlockNow() {
@@ -325,7 +331,8 @@ DWORD WINAPI XInputCapsDetour(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps
 
 DWORD WINAPI XInputDetour(DWORD user, XINPUT_STATE* state) {
     const DWORD r = ReadPad(user, state);
-    if (user < kUsers) _pad[user] = r == ERROR_SUCCESS && state ? state->Gamepad.wButtons : 0;
+    if (user < kUsers)
+        _pads.Set(static_cast<int>(user), r == ERROR_SUCCESS && state ? state->Gamepad.wButtons : 0, GetTickCount64());
     if (user < kUsers && state) NotePad(user, r == ERROR_SUCCESS, *state);  // before blocking: the real state
     if (r == ERROR_SUCCESS && state) {
         if (BlockNow()) std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
@@ -539,7 +546,7 @@ PadSnapshot ReadPads() {
         if (!sl.connected[u] && !test && now < sl.nextProbe[u]) continue;
         XINPUT_STATE st{};
         const bool ok = ReadPad(u, &st) == ERROR_SUCCESS;
-        _pad[u] = ok ? st.Gamepad.wButtons : 0;
+        _pads.Set(static_cast<int>(u), ok ? st.Gamepad.wButtons : 0, now);
         NotePad(u, ok, st);
         if (ok != sl.connected[u]) {
             sl.connected[u] = ok;
