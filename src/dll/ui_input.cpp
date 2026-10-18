@@ -61,6 +61,35 @@ std::atomic<uint16_t> _pad[kUsers] = {};
 // switch to the empty state (or back) as "unchanged".
 std::atomic<DWORD> _blockEpoch{0};
 
+// The last input device, for the prompts (PromptDevice).
+std::mutex _deviceMutex;
+prompts::DeviceTracker _tracker;
+std::atomic<prompts::Device> _device{prompts::Device::KeyboardMouse};
+
+void DeviceChanged(const char* why, unsigned detail) {  // _deviceMutex held
+    _device = _tracker.Current();
+    MC_LOG_INFO("ui_input: prompts now for %s (%s 0x%X)", prompts::DeviceName(_tracker.Current()), why, detail);
+}
+void NoteKeyboard(const char* why, unsigned detail) {
+    std::lock_guard lock(_deviceMutex);
+    if (_tracker.Keyboard()) DeviceChanged(why, detail);
+}
+void NoteMouseMove(float x, float y) {
+    std::lock_guard lock(_deviceMutex);
+    if (_tracker.MouseMove(x, y)) DeviceChanged("mouse move", 0);
+}
+void NotePad(DWORD user, bool ok, const XINPUT_STATE& st) {
+    std::lock_guard lock(_deviceMutex);
+    if (!ok) {
+        _tracker.PadGone(user);
+        return;
+    }
+    const XINPUT_GAMEPAD& g = st.Gamepad;
+    if (_tracker.Pad(user, g.wButtons, g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY, g.bLeftTrigger,
+                     g.bRightTrigger))
+        DeviceChanged("pad buttons", g.wButtons);
+}
+
 struct RawEvent {
     Event e;
     float clientW, clientH;
@@ -293,6 +322,7 @@ DWORD WINAPI XInputCapsDetour(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps
 DWORD WINAPI XInputDetour(DWORD user, XINPUT_STATE* state) {
     const DWORD r = ReadPad(user, state);
     if (user < kUsers) _pad[user] = r == ERROR_SUCCESS && state ? state->Gamepad.wButtons : 0;
+    if (user < kUsers && state) NotePad(user, r == ERROR_SUCCESS, *state);  // before blocking: the real state
     if (r == ERROR_SUCCESS && state) {
         if (BlockNow()) std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
         state->dwPacketNumber += _blockEpoch.load() * 0x10000u;
@@ -388,8 +418,23 @@ void SetCapture(bool on) {
 
 bool Blocking() { return BlockNow(); }
 
+prompts::Device PromptDevice() { return _device.load(); }
+
 bool OnWindowMessage(unsigned msg, uint64_t wp, int64_t lp) {
     const bool capture = _capture.load();
+    switch (msg) {  // which device the prompts show (all the time, not only under a panel)
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: NoteKeyboard("key", static_cast<unsigned>(wp)); break;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_MOUSEWHEEL: NoteKeyboard("mouse button", msg); break;
+    case WM_MOUSEMOVE:
+        NoteMouseMove(static_cast<float>(static_cast<short>(LOWORD(lp))),
+                      static_cast<float>(static_cast<short>(HIWORD(lp))));
+        break;
+    default: break;
+    }
     switch (msg) {
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
@@ -429,6 +474,10 @@ bool OnWindowMessage(unsigned msg, uint64_t wp, int64_t lp) {
 }
 
 void InjectEvent(const Event& e) {
+    if (e.type == Event::MouseMove)
+        NoteMouseMove(e.x, e.y);
+    else
+        NoteKeyboard("test event", static_cast<unsigned>(e.type));
     if (!_capture.load()) return;
     unsigned bw = 0, bh = 0;
     render::Overlay::BackbufferSize(&bw, &bh);
@@ -487,6 +536,7 @@ PadSnapshot ReadPads() {
         XINPUT_STATE st{};
         const bool ok = ReadPad(u, &st) == ERROR_SUCCESS;
         _pad[u] = ok ? st.Gamepad.wButtons : 0;
+        NotePad(u, ok, st);
         if (ok != sl.connected[u]) {
             sl.connected[u] = ok;
             if (!test) MC_LOG_INFO("ui_input: gamepad %lu %s", u, ok ? "connected" : "disconnected");

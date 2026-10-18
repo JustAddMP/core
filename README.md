@@ -58,6 +58,9 @@ out\net_fuzz.exe             malformed packets against session and UDP transport
 out\pending_join.exe         Steam join requests are handed to the next tick, never acted on mid-poll
 out\steam_friends.exe        JOIN FRIEND list against a fake Steam (hosting / guest / not hosting / version / full)
 out\pad_nav.exe              gamepad navigation of the panels (presses only, stick hysteresis, repeat, B = back)
+out\ui_prompts.exe           panel footer prompts: last input device (pad presses / sticks / triggers vs keys,
+                             clicks, real mouse moves), the prompt list per panel kind, X / Y act only through
+                             a prompt that shows them
 out\crash_dump.exe           crash handler: one minidump for the real crash, none for handled exceptions
 out\launcher_args.exe        launcher argument parsing: keys that need a value refuse to start without one
 out\config_set.exe           Config::Set saves a value into the ini (only that line changes; wins over env overrides);

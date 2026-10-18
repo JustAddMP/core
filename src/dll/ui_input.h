@@ -15,8 +15,14 @@
 #include <cstdint>
 
 #include "dll/pad_nav.h"
+#include "dll/ui_prompts.h"
 
 namespace mc::ui_input {
+
+// The input device the player used last (dll/ui_prompts.h DeviceTracker), for the panels' button prompts: followed
+// all the time, whether a panel is open or not, from the window's key/mouse messages and every XInput read (the
+// game's and ours, the test pad included), plus injected test events. Each switch is logged. Any thread.
+prompts::Device PromptDevice();
 
 bool Install();  // init thread, once; failures are logged and only disable blocking
 

@@ -180,6 +180,7 @@ int FirstMenuItem() {  // first item that is not a player row
 }
 
 void RestoreSelection(Action selAction, int selPlayer, int selOption);
+std::vector<prompts::Prompt> PanelPrompts();
 
 void BuildPauseItems() {
     UiState& u = U();
@@ -421,15 +422,17 @@ void Open(Panel p, bool pwForHost = false) {
         u.items = {{pwForHost ? "SET PASSWORD" : "CONNECT", Action::SubmitPassword}, {"CANCEL", Action::Back}};
     }
     ui_input::SetCapture(true);
-    MC_LOG_INFO("ui: %s panel opened", p == Panel::PauseCoop    ? "co-op"
-                                       : p == Panel::JoinIp     ? "join-by-ip"
-                                       : p == Panel::Password   ? "password"
-                                       : p == Panel::PlayerMenu ? "player"
-                                       : p == Panel::Lobby      ? "lobby"
-                                       : p == Panel::Settings   ? "settings"
-                                       : p == Panel::Name       ? "name"
-                                       : p == Panel::Friends    ? "join-friend"
-                                                                : "confirm-kick");
+    MC_LOG_INFO("ui: %s panel opened (footer %s)",
+                p == Panel::PauseCoop    ? "co-op"
+                : p == Panel::JoinIp     ? "join-by-ip"
+                : p == Panel::Password   ? "password"
+                : p == Panel::PlayerMenu ? "player"
+                : p == Panel::Lobby      ? "lobby"
+                : p == Panel::Settings   ? "settings"
+                : p == Panel::Name       ? "name"
+                : p == Panel::Friends    ? "join-friend"
+                                         : "confirm-kick",
+                prompts::Describe(PanelPrompts(), ui_input::PromptDevice()).c_str());
 }
 
 void Close() {
@@ -615,6 +618,89 @@ void Paste() {
     CloseClipboard();
 }
 
+// ---- prompts: what the open panel's footer offers (dll/ui_prompts.h). The footer drawing and the pad's X / Y / LB /
+// RB handling both come from this, so a prompt always does what it says.
+const Item* SelectedItem() {
+    const UiState& u = U();
+    return u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) ? &u.items[static_cast<size_t>(u.selected)]
+                                                                           : nullptr;
+}
+
+std::vector<prompts::Prompt> PanelPrompts() {
+    const UiState& u = U();
+    const Item* sel = SelectedItem();
+    prompts::Context c;
+    switch (u.panel) {
+    case Panel::None: return {};
+    case Panel::PauseCoop:
+        c.onStepper = sel && Stepper(*sel);
+        c.accept = c.onStepper ? "Next" : "Select";
+        if (u.info.phase == Coop::Phase::Hosting || u.info.phase == Coop::Phase::Starting) {
+            c.yLabel = "Invite";
+            c.yAction = prompts::Do::Invite;
+        }
+        break;
+    case Panel::Lobby:
+        c.onStepper = sel && Stepper(*sel);
+        if (Hosting()) {
+            c.xLabel = "Start";
+            c.xAction = prompts::Do::Start;
+            c.yLabel = "Invite";
+            c.yAction = prompts::Do::Invite;
+        } else if (u.info.phase == Coop::Phase::Connected && !u.info.reconnecting) {
+            c.xLabel = u.info.hostInGame ? "Join game" : "Ready";
+            c.xAction = u.info.hostInGame ? prompts::Do::JoinGame : prompts::Do::Ready;
+        }
+        break;
+    case Panel::Settings:
+        c.onStepper = sel && Stepper(*sel) && sel->action != Action::EditName;
+        c.accept = c.onStepper ? "Change" : "Select";
+        break;
+    case Panel::Friends:
+        c.accept = sel && sel->action == Action::PickFriend ? "Join" : "Select";
+        c.refresh = true;
+        break;
+    case Panel::JoinIp:
+    case Panel::Password:
+    case Panel::Name:
+        c.textBox = true;
+        c.accept = u.panel == Panel::Name ? "Save" : u.panel == Panel::Password && u.pwForHost ? "Set" : "Connect";
+        c.back = "Cancel";
+        break;
+    case Panel::PlayerMenu: c.back = "Cancel"; break;
+    case Panel::ConfirmKick:
+        c.accept = "Yes";
+        c.back = "No";
+        break;
+    }
+    return prompts::Build(c);
+}
+
+void RemoveLastChar() {
+    std::string& t = TextBuf();
+    if (!t.empty()) t.pop_back();
+    U().caret = 0;
+}
+
+// An extra prompt's action (X / Y / LB / RB on the pad, F5 / Backspace / Ctrl+V on the keyboard).
+void RunPrompt(prompts::Do d) {
+    switch (d) {
+    case prompts::Do::Delete: RemoveLastChar(); break;
+    case prompts::Do::Paste:
+        Paste();
+        U().caret = 0;
+        break;
+    case prompts::Do::Refresh: Run(Action::RefreshFriends); break;
+    case prompts::Do::Ready: Run(Action::Ready); break;
+    case prompts::Do::Start: Run(Action::Start); break;
+    case prompts::Do::JoinGame: Run(Action::JoinGame); break;
+    case prompts::Do::Invite: Run(Action::Invite); break;
+    case prompts::Do::Accept:
+    case prompts::Do::Back:
+    case prompts::Do::Change: break;  // A / B / the d-pad are handled as navigation
+    }
+}
+
 void HandleInput(float dt) {
     UiState& u = U();
     ui_input::Event e;
@@ -639,9 +725,12 @@ void HandleInput(float dt) {
                 }
                 return;
             case VK_ESCAPE: Run(Action::Back); return;
+            case VK_F5:
+                if (u.panel == Panel::Friends) Run(Action::RefreshFriends);  // the footer's "F5 Refresh"
+                break;
             case VK_BACK:
                 if (TextPanel(u.panel)) {
-                    if (!TextBuf().empty()) TextBuf().pop_back();
+                    RemoveLastChar();
                 } else {
                     Run(Action::Back);
                     return;
@@ -692,10 +781,23 @@ void HandleInput(float dt) {
     if (u.panel == Panel::None) return;
 
     // Gamepad (dll/pad_nav.h): every connected pad, d-pad or left stick with repeat, A = select, B / START / BACK =
-    // back. Only presses act: what was held when the panel opened waits for its release.
+    // back, X / Y / LB / RB = what the footer's prompt for that button says (nothing without one). Only presses
+    // act: what was held when the panel opened waits for its release.
     const uint32_t nav = u.pad.Update(ui_input::ReadPads(), dt);
     if (u.items.empty()) return;
     u.selected = std::clamp(u.selected, 0, static_cast<int>(u.items.size()) - 1);
+    for (uint32_t bit : {PadNav::kX, PadNav::kY, PadNav::kLB, PadNav::kRB}) {
+        prompts::Button b;
+        prompts::Do d;
+        if (!(nav & bit) || !prompts::ButtonFromNav(bit, &b)) continue;
+        if (!prompts::PadAction(PanelPrompts(), b, &d)) {
+            MC_LOG_DEBUG("ui: pad %s: no prompt on this panel", prompts::ButtonName(b));
+            continue;
+        }
+        MC_LOG_INFO("ui: pad %s -> %s", prompts::ButtonName(b), prompts::DoName(d));
+        RunPrompt(d);
+        return;
+    }
     if (nav & PadNav::kAccept) {
         MC_LOG_DEBUG("ui: pad A on '%s'", u.items[static_cast<size_t>(u.selected)].label.c_str());
         Run(TextPanel(u.panel) && u.items[static_cast<size_t>(u.selected)].action != Action::Back
@@ -746,13 +848,79 @@ uint32_t Alpha(uint32_t argb, float a) {
     return (argb & 0x00FFFFFF) | (al << 24);
 }
 
-// Key hint like the game's footer ("[Enter] Select"): the key in a light box, the action next to it.
-float Hint(render::DrawList& d, float x, float y, const std::string& key, const std::string& action, float px) {
-    const float kw = render::DrawList::TextWidth(key, px) + px * 0.5f;
-    d.Rect(x, y + px * 0.05f, kw, px * 1.0f, 0xFFE9E5DB);
-    d.Text(x + px * 0.25f, y + px * 0.05f, key, px, 0xFF111111);
-    const float aw = d.Text(x + kw + px * 0.35f, y + px * 0.05f, action, px, kText);
+// ---- footer prompts (dll/ui_prompts.h): pad glyphs or key names, for the device used last ----------------------------
+// A filled disc from horizontal strips (the overlay draws rectangles and ASCII text only).
+void Disc(render::DrawList& d, float cx, float cy, float r, uint32_t col) {
+    const int n = std::max(8, static_cast<int>(r * 2 / 1.5f));
+    const float h = 2 * r / static_cast<float>(n);
+    for (int i = 0; i < n; ++i) {
+        const float mid = -r + (static_cast<float>(i) + 0.5f) * h;
+        const float hw = std::sqrt(std::max(0.0f, r * r - mid * mid));
+        d.Rect(cx - hw, cy - r + static_cast<float>(i) * h, hw * 2, h + 0.6f, col);
+    }
+}
+
+// The pad glyph (Xbox layout and colours: XInput pads; the game's own icons are Flash art we cannot draw), px wide.
+float PadGlyph(render::DrawList& d, float x, float y, prompts::Button b, float px) {
+    using prompts::Button;
+    const float D = px * 1.15f, cy = y + px * 0.55f;
+    switch (b) {
+    case Button::A:
+    case Button::B:
+    case Button::X:
+    case Button::Y: {
+        const uint32_t fill = b == Button::A   ? 0xFF4F9E2C
+                              : b == Button::B ? 0xFFC8392D
+                              : b == Button::X ? 0xFF2F6FC2
+                                               : 0xFFE0B21C;
+        const uint32_t ink = b == Button::Y ? 0xFF1A1A1A : 0xFFFFFFFF;
+        Disc(d, x + D * 0.5f, cy, D * 0.5f + 1.0f, 0xFF1A1917);  // dark rim
+        Disc(d, x + D * 0.5f, cy, D * 0.5f - px * 0.04f, fill);
+        const std::string letter = prompts::ButtonName(b);
+        const float lpx = px * 0.82f, lw = render::DrawList::TextWidth(letter, lpx);
+        d.Text(x + (D - lw) * 0.5f, cy - lpx * 0.5f, letter, lpx, ink);
+        return D;
+    }
+    case Button::LB:
+    case Button::RB: {  // a shoulder button: a light bar with its name
+        const std::string name = prompts::ButtonName(b);
+        const float npx = px * 0.75f, w = render::DrawList::TextWidth(name, npx) + px * 0.6f, h = px * 0.8f;
+        d.Rect(x + 1, cy - h * 0.5f, w - 2, h, 0xFFE9E5DB);
+        d.Rect(x, cy - h * 0.5f + 1, w, h - 2, 0xFFE9E5DB);
+        d.Text(x + px * 0.3f, cy - npx * 0.5f, name, npx, 0xFF111111);
+        return w;
+    }
+    case Button::DpadLeftRight: {  // a d-pad cross, the left and right arms lit
+        const float arm = D / 3, cx = x, top = cy - D * 0.5f;
+        d.Rect(cx + arm, top, arm, D, 0xFF5C5852);           // vertical bar (dim)
+        d.Rect(cx, top + arm, D, arm, 0xFF5C5852);           // horizontal bar
+        d.Rect(cx, top + arm, arm * 0.9f, arm, 0xFFE9E5DB);  // left arm
+        d.Rect(cx + D - arm * 0.9f, top + arm, arm * 0.9f, arm, 0xFFE9E5DB);  // right arm
+        return D;
+    }
+    }
+    return 0;
+}
+
+// One prompt like the game's footer: the pad glyph or the key in a light box, the action next to it. Returns the
+// advance width.
+float Hint(render::DrawList& d, float x, float y, const prompts::Prompt& p, prompts::Device dev, float px) {
+    float kw;
+    if (dev == prompts::Device::Pad) {
+        kw = PadGlyph(d, x, y, p.pad, px);
+    } else {
+        kw = render::DrawList::TextWidth(p.key, px) + px * 0.5f;
+        d.Rect(x, y + px * 0.05f, kw, px * 1.0f, 0xFFE9E5DB);
+        d.Text(x + px * 0.25f, y + px * 0.05f, p.key, px, 0xFF111111);
+    }
+    const float aw = d.Text(x + kw + px * 0.35f, y + px * 0.05f, p.label, px, kText);
     return kw + px * 0.35f + aw + px * 1.2f;
+}
+
+// The open panel's footer, drawn from the same list the pad handling uses (PanelPrompts).
+void DrawPrompts(render::DrawList& d, float x, float y, float px) {
+    const prompts::Device dev = ui_input::PromptDevice();
+    for (const prompts::Prompt& p : prompts::Shown(PanelPrompts(), dev)) x += Hint(d, x, y, p, dev, px);
 }
 
 void DrawToasts(render::DrawList& d, float W, float s) {
@@ -901,12 +1069,7 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
     }
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
-    float hx = x + pad;
-    const bool onOption = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
-                          Stepper(u.items[static_cast<size_t>(u.selected)]);
-    if (onOption) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
-    hx += Hint(d, hx, y, "Enter", onOption ? "Next" : "Select", 22 * s);
-    Hint(d, hx, y, "Esc", "Back", 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s);
 }
 
 // JOIN FRIEND: friends playing this game (name, and what they do: hosting / not hosting / other version / full),
@@ -1009,13 +1172,11 @@ void DrawFriends(render::DrawList& d, float W, float H, float s) {
         y += irowH;
     }
     y += 30 * s;
-    float hx = x + pad;
-    hx += Hint(d, hx, y, "Enter", u.selected < nRows ? "Join" : "Select", 22 * s);
-    Hint(d, hx, y, "Esc", "Back", 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s);
 }
 
 void DrawTextBox(render::DrawList& d, float W, float H, float s, float dt, const std::string& title,
-                 const std::string& label, const std::string& shown, const std::string& submit) {
+                 const std::string& label, const std::string& shown) {
     UiState& u = U();
     u.caret += dt;
     d.Rect(0, 0, W, H, kShade);
@@ -1037,14 +1198,11 @@ void DrawTextBox(render::DrawList& d, float W, float H, float s, float dt, const
     y += fh + 24 * s;
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 20 * s;
-    float hx = x + pad;
-    hx += Hint(d, hx, y, "Enter", submit, 22 * s);
-    Hint(d, hx, y, "Esc", "Cancel", 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s);
 }
 
 // PlayerMenu / ConfirmKick: title, one line of text, the items and the key hints (the text box panel's frame).
-void DrawChoice(render::DrawList& d, float W, float H, float s, const std::string& title, const std::string& text,
-                const std::string& yes, const std::string& no) {
+void DrawChoice(render::DrawList& d, float W, float H, float s, const std::string& title, const std::string& text) {
     UiState& u = U();
     d.Rect(0, 0, W, H, kShade);
     const float w = 620 * s, x = (W - w) * 0.5f, pad = 36 * s;
@@ -1064,21 +1222,18 @@ void DrawChoice(render::DrawList& d, float W, float H, float s, const std::strin
     y += 16 * s;
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 20 * s;
-    float hx = x + pad;
-    hx += Hint(d, hx, y, "Enter", yes, 22 * s);
-    Hint(d, hx, y, "Esc", no, 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s);
 }
 
 void DrawPlayerMenu(render::DrawList& d, float W, float H, float s) {
-    DrawChoice(d, W, H, s, Upper(U().targetName), "Remove this player from your co-op game?", "Select", "Cancel");
+    DrawChoice(d, W, H, s, Upper(U().targetName), "Remove this player from your co-op game?");
 }
 
 void DrawConfirmKick(render::DrawList& d, float W, float H, float s) {
     const UiState& u = U();
     DrawChoice(d, W, H, s, u.targetBan ? "KICK AND BAN" : "KICK",
-               std::string(u.targetBan ? "Kick and ban " : "Kick ") + u.targetName + "? Enter = yes, Esc = no" +
-                   (u.targetBan ? " (banned until you stop hosting)" : ""),
-               "Yes", "No");
+               std::string(u.targetBan ? "Kick and ban " : "Kick ") + u.targetName + "?" +
+                   (u.targetBan ? " (banned until you stop hosting)" : ""));
 }
 
 // The lobby: like the CO-OP panel, with each player's character and ready state.
@@ -1166,12 +1321,7 @@ void DrawLobby(render::DrawList& d, float W, float H, float s) {
     }
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
-    float hx = x + pad;
-    const bool onStep = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
-                        Stepper(u.items[static_cast<size_t>(u.selected)]);
-    if (onStep) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
-    hx += Hint(d, hx, y, "Enter", "Select", 22 * s);
-    Hint(d, hx, y, "Esc", "Back", 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s);
 }
 
 void DrawSettings(render::DrawList& d, float W, float H, float s) {
@@ -1190,28 +1340,22 @@ void DrawSettings(render::DrawList& d, float W, float H, float s) {
     y += 40 * s;
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
-    float hx = x + pad;
-    const bool onStep = u.selected >= 0 && u.selected < static_cast<int>(u.items.size()) &&
-                        Stepper(u.items[static_cast<size_t>(u.selected)]) &&
-                        u.items[static_cast<size_t>(u.selected)].action != Action::EditName;
-    if (onStep) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
-    hx += Hint(d, hx, y, "Enter", onStep ? "Change" : "Select", 22 * s);
-    Hint(d, hx, y, "Esc", "Back", 22 * s);
+    DrawPrompts(d, x + pad, y, 22 * s);
 }
 
 void DrawName(render::DrawList& d, float W, float H, float s, float dt) {
-    DrawTextBox(d, W, H, s, dt, "PLAYER NAME", "EMPTY = YOUR STEAM NAME", U().nameText, "Save");
+    DrawTextBox(d, W, H, s, dt, "PLAYER NAME", "EMPTY = YOUR STEAM NAME", U().nameText);
 }
 
 void DrawJoinIp(render::DrawList& d, float W, float H, float s, float dt) {
-    DrawTextBox(d, W, H, s, dt, "JOIN BY IP", "HOST ADDRESS (IP OR IP:PORT)", U().ipText, "Connect");
+    DrawTextBox(d, W, H, s, dt, "JOIN BY IP", "HOST ADDRESS (IP OR IP:PORT)", U().ipText);
 }
 
 void DrawPassword(render::DrawList& d, float W, float H, float s, float dt) {
     const UiState& u = U();
     DrawTextBox(d, W, H, s, dt, u.pwForHost ? "SET PASSWORD" : "PASSWORD",
                 u.pwForHost ? "PLAYERS JOINING BY IP MUST TYPE IT" : "THIS GAME NEEDS A PASSWORD",
-                std::string(u.pwText.size(), '*'), u.pwForHost ? "Set" : "Connect");
+                std::string(u.pwText.size(), '*'));
 }
 
 }  // namespace
@@ -1237,7 +1381,8 @@ std::string CoopUi::Describe() {
     const UiState& u = U();
     const auto pi = static_cast<size_t>(u.panel);
     std::string out = std::string("panel ") + (pi < std::size(kNames) ? kNames[pi] : "?") + ", selected " +
-                      std::to_string(u.selected);
+                      std::to_string(u.selected) + ", footer " +
+                      prompts::Describe(PanelPrompts(), ui_input::PromptDevice());
     char buf[256];
     for (size_t i = 0; i < u.items.size(); ++i) {
         const Item& it = u.items[i];

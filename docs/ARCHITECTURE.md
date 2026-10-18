@@ -48,7 +48,8 @@ src/
   dll/                    dllmain (init thread), mod (per-frame tick; process-exit hooks: leave the session cleanly),
                           coop (sessions: host / join / Steam lobby / invites / password / kick / the pre-game lobby),
                           coop_ui (pause co-op panel with kick / kick and ban, the LOBBY panel, CO-OP SETTINGS, join-by-IP,
-                          password and name boxes, banners),
+                          password and name boxes, banners; footer prompts with pad glyphs or key names for the
+                          device used last, ui_prompts.h),
                           ui_input (panel input; blocks the game's DirectInput/XInput/window input while a panel is
                           open; test pad: a virtual XInput gamepad for automated tests, test_pad = 1), test_input (core 0.7: scripted pad
                           presses, mouse moves/clicks, keys, panel open and dump from dev\<tag>.input.txt on the

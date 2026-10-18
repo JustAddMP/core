@@ -7,7 +7,8 @@
 //     with hysteresis (pressed beyond kStickPress, released below kStickRelease) so a stick resting near the
 //     threshold does not chatter;
 //   - a held direction repeats (kFirstRepeatS, then every kRepeatS);
-//   - A = accept, B / START / BACK = back;
+//   - A = accept, B / START / BACK = back; X, Y, LB, RB are reported as presses (no repeat) for the panels' extra
+//     prompts (dll/ui_prompts.h), like accept/back never together with movement;
 //   - only presses act: whatever is already held when a panel opens (the A that chose the menu entry, the stick
 //     still pushed) does nothing until it is released (Reset with the current state).
 #include <cstdint>
@@ -24,7 +25,11 @@ struct PadSnapshot {
 
 class PadNav {
 public:
-    enum Action : uint32_t { kUp = 1, kDown = 2, kLeft = 4, kRight = 8, kAccept = 16, kBack = 32 };
+    enum Action : uint32_t {
+        kUp = 1, kDown = 2, kLeft = 4, kRight = 8, kAccept = 16, kBack = 32,
+        kX = 64, kY = 128, kLB = 256, kRB = 512
+    };
+    static constexpr uint32_t kButtonActions = kAccept | kBack | kX | kY | kLB | kRB;
     static constexpr int kStickPress = 16000;
     static constexpr int kStickRelease = 11000;
     static constexpr float kFirstRepeatS = 0.4f;
@@ -33,6 +38,7 @@ public:
     // XINPUT_GAMEPAD_* values (kept here so the header needs no xinput.h)
     static constexpr uint16_t kDpadUp = 0x0001, kDpadDown = 0x0002, kDpadLeft = 0x0004, kDpadRight = 0x0008;
     static constexpr uint16_t kStart = 0x0010, kBackButton = 0x0020, kA = 0x1000, kB = 0x2000;
+    static constexpr uint16_t kXButton = 0x4000, kYButton = 0x8000, kLBButton = 0x0100, kRBButton = 0x0200;
 
     // What is held now does not act until released.
     void Reset(const PadSnapshot& s) {
@@ -49,8 +55,8 @@ public:
         const uint32_t now = raw & ~stale_;
         const uint32_t pressed = now & ~held_;
         held_ = now;
-        uint32_t out = pressed & (kAccept | kBack);
-        if (out & (kAccept | kBack)) {  // a confirm/back ends the frame: no movement with it
+        uint32_t out = pressed & kButtonActions;
+        if (out) {  // a button press ends the frame: no movement with it
             repeatDir_ = 0;
             return out;
         }
@@ -87,6 +93,10 @@ private:
         if (s.buttons & kDpadRight) a |= kRight;
         if (s.buttons & kA) a |= kAccept;
         if (s.buttons & (kB | kStart | kBackButton)) a |= kBack;
+        if (s.buttons & kXButton) a |= kX;
+        if (s.buttons & kYButton) a |= kY;
+        if (s.buttons & kLBButton) a |= kLB;
+        if (s.buttons & kRBButton) a |= kRB;
         const int ax = std::abs(static_cast<int>(s.lx)), ay = std::abs(static_cast<int>(s.ly));
         uint32_t stick = 0;
         // keep the current stick direction while its axis stays beyond the release threshold
