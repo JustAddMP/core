@@ -52,6 +52,8 @@ out\net_interest.exe         interest management
 out\net_motion.exe           remote motion controllers (locomotion against a simulated AI walker, car copies) and
                              8-bit control packing (also a slow AI sprint, a teleport that stops the body, pin
                              retries)
+out\net_latency.exe          latency: adaptive playout delay under jitter/loss/drift, send -> receive delay with and
+                             without Flush, fast retransmit under loss, lanes vs head-of-line blocking, session clock
 out\core_trace.exe           sync trace (file next to the log, header, log copy, whole lines from 4 threads, only
                              the newest kept) and the five previous logs kept
 out\net_fuzz.exe             malformed packets against session and UDP transport
