@@ -17,7 +17,9 @@
 namespace mc::net {
 
 // Bump when the session or any app message format changes incompatibly.
-constexpr uint32_t kProtocolVersion = 8;  // 5: session password; 6: Kicked, ban Reject; 7: lobby (net/lobby.h); 8: reconnect
+// 5: session password; 6: Kicked, ban Reject; 7: lobby (net/lobby.h); 8: reconnect; 9: reliable lanes (UDP lane units),
+// session clock (Pong trailer)
+constexpr uint32_t kProtocolVersion = 9;
 
 using PlayerId = uint8_t;
 constexpr PlayerId kHostPlayer = 0;
@@ -86,6 +88,10 @@ struct SessionConfig {
     double reconnectFirstDelayS = 0.5;  // first retry after this long, doubled per attempt ...
     double reconnectMaxDelayS = 5.0;    // ... up to this
     double reconnectAttemptS = 8.0;     // one attempt (transport connect + handshake) gives up after this long
+
+    // Test only: added to this session's clock (SessionTime, the clock stamp in its Pongs), as if this machine's
+    // clock had another epoch. 0 in a game.
+    double testClockSkewS = 0;
 };
 
 // Traffic of one app message id since Host()/Join() (docs/protocol.md "Traffic statistics"). Bytes are what the
@@ -157,6 +163,29 @@ public:
     bool SendTo(PlayerId player, uint16_t msgId, std::span<const uint8_t> payload,
                 Reliability rel = Reliability::Reliable);
     bool SendChat(std::string_view text);
+    // Put every message queued so far on the wire now instead of at the next Poll (docs/protocol.md "Latency"). Call
+    // it once at the end of the frame that sent them (core's Coop::Tick does, after GameModule::SessionTick).
+    void Flush();
+
+    // ---- reliable lanes (docs/protocol.md "Lanes") ----
+    // Reliable app messages with an id in [firstMsg, lastMsg] go on `lane` (1..kLanes-1; 0 = the default lane):
+    // they are ordered only with the other messages of that lane (and with lane 0), so a lost or large message of
+    // another system does not hold them back. Messages that must stay ordered with each other need the same lane.
+    // Set it on host and guests alike (OnSessionStart); it is not sent anywhere. Later calls win for overlaps.
+    void SetLane(uint16_t firstMsg, uint16_t lastMsg, uint8_t lane);
+    uint8_t LaneOf(uint16_t msgId) const;
+
+    // ---- session clock (docs/protocol.md "Session clock") ----
+    // Seconds on the host's clock: the host's own clock, a guest's clock moved by the offset measured with the
+    // session pings (NTP-like, best round trip of the last ones). The same instant reads (nearly) the same on every
+    // game, so a time stamped by one player tells another how old it is (SessionTime() - stamp = one-way delay).
+    double SessionTime() const;
+    uint32_t SessionTimeMs() const { return static_cast<uint32_t>(static_cast<uint64_t>(SessionTime() * 1000.0)); }
+    // Host: always. Guest: once a clock sample came back (a few 100 ms after joining).
+    bool ClockSynced() const { return state_ == SessionState::Hosting || clockSynced_; }
+    double ClockOffsetS() const { return state_ == SessionState::Hosting ? 0.0 : clockOffset_; }  // host - local
+    // Guest: the most the offset can be off (half the round trip of the sample it came from), ms. Host: 0.
+    float ClockErrorMs() const { return state_ == SessionState::Hosting ? 0.0f : clockErrMs_; }
 
     // ---- state ----
     SessionState State() const { return state_; }
@@ -293,8 +322,12 @@ private:
     bool KickImpl(PlayerId id, std::string_view reason, bool ban);
     bool IsBanned(PeerId peer) const;
     void DispatchApp(uint16_t id, PlayerId from, std::span<const uint8_t> payload);
-    bool SendRaw(PeerId peer, const ByteWriter& w, Reliability rel);
-    bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except);  // false if any send failed
+    bool SendRaw(PeerId peer, const ByteWriter& w, Reliability rel, uint8_t lane = 0);
+    bool BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane = 0);  // false if any failed
+    double LocalClock() const;
+    void SendPing(double now);
+    void OnPong(ByteReader& r, PlayerInfo* from);
+    void ClockSample(double sentAt, double recvAt, double remoteClock);
     void CountSent(uint16_t id, size_t bytes, int copies, int failed);
     void Fail(const std::string& reason);
     void Reset();
@@ -337,6 +370,24 @@ private:
     int reconnectAttempts_ = 0;
     bool attemptOpen_ = false;
     PlayerId reconnectOldId_ = kNoPlayer;
+
+    // lanes
+    struct LaneRange {
+        uint16_t first, last;
+        uint8_t lane;
+    };
+    std::vector<LaneRange> lanes_;
+    // pings and the session clock
+    std::array<std::pair<uint32_t, double>, 16> pingSent_{};  // (wire stamp, exact local send time)
+    int pingBurst_ = 0;                                         // quick pings left (clock sync after a join)
+    struct ClockSampleRec {
+        double offset = 0, rtt = 0, at = -1;
+    };
+    std::array<ClockSampleRec, 16> clockSamples_{};
+    size_t clockNext_ = 0;
+    bool clockSynced_ = false;
+    double clockOffset_ = 0;
+    float clockErrMs_ = 0;
 };
 
 }  // namespace mc::net

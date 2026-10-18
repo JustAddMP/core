@@ -46,6 +46,7 @@ public:
     bool Host(uint16_t port) override;
     PeerId Connect(std::string_view address) override;
     bool Send(PeerId peer, std::span<const uint8_t> data, Reliability rel) override;
+    bool SendOnLane(PeerId peer, std::span<const uint8_t> data, Reliability rel, uint8_t lane) override;
     void Poll(const EventHandler& handler) override;
     void Disconnect(PeerId peer) override;
     void Close() override;
@@ -60,7 +61,7 @@ public:
     const UdpOptions& Options() const;
     uint16_t BoundPort() const;
     // Send everything queued now (Poll() does this too).
-    void Flush();
+    void Flush() override;
     // Incoming connections evicted to make room (see UdpOptions::maxPeers).
     uint64_t Evictions() const;
     // ALIVE packets the keepalive thread sent (while Poll() was stalled).

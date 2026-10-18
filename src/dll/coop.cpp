@@ -726,7 +726,11 @@ void Coop::Tick(float dt) {
         s.gameLobby.Tick();
         UpdateSteamLobbyData();
     }
-    if (s.session) GetGameModule().SessionTick(dt);
+    if (s.session) {
+        GetGameModule().SessionTick(dt);
+        // What the game sent this frame goes out now, not with the next frame's Poll (docs/protocol.md "Latency").
+        s.session->Flush();
+    }
     if (s.session && s.session->IsActive() && s.session->Players().size() > 1) {
         static const double logEvery = core::Config::Get().GetInt("net_log_interval", 5);
         if (logEvery > 0 && s.logMon.Sample(*s.session, s.now, logEvery))

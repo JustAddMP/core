@@ -28,6 +28,8 @@ public:
     bool Host(uint16_t port) override;
     PeerId Connect(std::string_view address) override;
     bool Send(PeerId peer, std::span<const uint8_t> data, Reliability rel) override;
+    bool SendOnLane(PeerId peer, std::span<const uint8_t> data, Reliability rel, uint8_t lane) override;
+    void Flush() override;  // every part
     void Poll(const EventHandler& handler) override;
     void Disconnect(PeerId peer) override;
     void Close() override;

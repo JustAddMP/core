@@ -21,6 +21,12 @@ enum class Reliability : uint8_t {
 constexpr size_t kMaxReliableMessage = 256 * 1024;
 constexpr size_t kMaxUnreliableMessage = 1100;
 
+// Reliable lanes (docs/protocol.md "Lanes"): independent ordered streams per peer, so a lost or large reliable message
+// of one system does not hold back the messages of another (head-of-line blocking). Lane 0 is the default and a
+// barrier: a lane-0 message is delivered only after everything sent before it on any lane. A message on lane k > 0 is
+// ordered only with the earlier messages of lane k. Unreliable messages ignore the lane.
+constexpr int kLanes = 8;
+
 enum class DisconnectReason : uint8_t {
     None = 0,
     Local,          // we called Disconnect()/Close() (never reported as an event)
@@ -48,6 +54,7 @@ struct PeerStats {
     uint64_t bytesSent = 0, bytesReceived = 0;
     uint64_t packetsSent = 0, packetsReceived = 0;
     uint32_t resends = 0;   // reliable retransmissions (backend dependent)
+    uint32_t fastResends = 0;  // of those: sent again early because a later unit was acknowledged (UDP)
     uint32_t reliableQueued = 0;  // reliable units (<= 1100 bytes each) not yet acknowledged (UDP; 0 = not known)
 };
 
@@ -63,6 +70,15 @@ public:
     virtual PeerId Connect(std::string_view address) = 0;
     // Queue a message. Returns false if the peer is unknown/not connected or the message is too large.
     virtual bool Send(PeerId peer, std::span<const uint8_t> data, Reliability rel) = 0;
+    // The same on a reliable lane (0..kLanes-1, see kLanes). A transport without lanes sends it like Send (lane 0
+    // ordering for everything, which is stricter and still correct).
+    virtual bool SendOnLane(PeerId peer, std::span<const uint8_t> data, Reliability rel, uint8_t lane) {
+        (void)lane;
+        return Send(peer, data, rel);
+    }
+    // Put everything queued on the wire now (Poll does it too). Call it once at the end of the frame that produced
+    // the messages so they do not wait for the next Poll (up to a frame of delay). Optional.
+    virtual void Flush() {}
     // Pump: receive, retransmit, keepalive, timeouts; delivers events to handler. Call once per frame.
     virtual void Poll(const EventHandler& handler) = 0;
     // Close one connection (sends a clean disconnect). No Disconnected event is raised for it.

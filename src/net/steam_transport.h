@@ -13,7 +13,7 @@ struct SteamOptions {
     double timeoutS = 10.0;
     double connectTimeoutS = 20.0;  // relay/NAT setup can take a few seconds
     double pingIntervalS = 1.0;
-    int channel = 7;                // P2P channel used for all our traffic
+    int channel = 7;                // P2P channel of our traffic; reliable lane k > 0 uses channel + k (kLanes)
     int maxPeers = 8;
 };
 
@@ -34,6 +34,7 @@ public:
     bool Host(uint16_t port) override;  // port ignored
     PeerId Connect(std::string_view address) override;  // decimal SteamID64
     bool Send(PeerId peer, std::span<const uint8_t> data, Reliability rel) override;
+    bool SendOnLane(PeerId peer, std::span<const uint8_t> data, Reliability rel, uint8_t lane) override;
     void Poll(const EventHandler& handler) override;
     void Disconnect(PeerId peer) override;
     void Close() override;

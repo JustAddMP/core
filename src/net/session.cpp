@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
 
@@ -19,6 +20,11 @@ constexpr size_t kMaxChatLen = 256;
 constexpr size_t kMaxReasonLen = 256;
 constexpr double kRejectLinger = 1.0;
 constexpr double kPingTableInterval = 2.0;
+// Session clock (docs/protocol.md "Session clock"): after a join the guest pings this often a few times, so its clock
+// is in sync within a few 100 ms instead of after several seconds.
+constexpr int kPingBurst = 8;
+constexpr double kPingBurstInterval = 0.1;
+constexpr double kClockSampleMaxAge = 30.0;  // s: samples older than this no longer count (clock drift)
 constexpr size_t kMaxAuthKeys = 256;  // host: addresses with recent password failures kept before stale ones are pruned
 
 enum Msg : uint8_t {
@@ -130,6 +136,13 @@ void Session::Reset() {
     attemptOpen_ = false;  // (reconnectAttempts_ stays readable after a failed reconnect)
     reconnectUntil_ = reconnectNextAt_ = 0;
     reconnectOldId_ = kNoPlayer;
+    pingSent_ = {};
+    pingBurst_ = 0;
+    clockSamples_ = {};
+    clockNext_ = 0;
+    clockSynced_ = false;
+    clockOffset_ = 0;
+    clockErrMs_ = 0;
 }
 
 bool Session::Host(uint16_t port) {
@@ -246,19 +259,14 @@ void Session::Poll() {
         return;
     }
 
-    if (now - lastPing_ >= cfg_.pingIntervalS) {
+    bool sent = false;
+    if (now - lastPing_ >= (pingBurst_ > 0 ? kPingBurstInterval : cfg_.pingIntervalS)) {
         lastPing_ = now;
-        ByteWriter w(8);
-        w.U8(kPing);
-        w.U32(NowMs());
-        if (state_ == SessionState::Hosting) {
-            for (auto& p : players_)
-                if (p.id != kHostPlayer) SendRaw(p.peer, w, Reliability::Unreliable);
-        } else if (state_ == SessionState::Connected) {
-            SendRaw(hostPeer_, w, Reliability::Unreliable);
-        }
+        SendPing(now);
+        sent = true;
     }
     if (state_ == SessionState::Hosting && now - lastPingTable_ >= kPingTableInterval) {
+        sent = true;
         lastPingTable_ = now;
         // Refresh from transport stats when available (smoother than our own ping samples).
         for (auto& p : players_) {
@@ -274,6 +282,96 @@ void Session::Poll() {
         }
         BroadcastRaw(w, Reliability::Unreliable, kNoPlayer);
     }
+    // A ping waiting for the next Poll would measure our frame time as network delay (and skew the clock sample).
+    if (sent) transport_.Flush();
+}
+
+void Session::Flush() {
+    if (state_ == SessionState::Idle || state_ == SessionState::Disconnected) return;
+    transport_.Flush();
+}
+
+void Session::SetLane(uint16_t firstMsg, uint16_t lastMsg, uint8_t lane) {
+    if (lastMsg < firstMsg) std::swap(firstMsg, lastMsg);
+    lanes_.push_back({firstMsg, lastMsg, static_cast<uint8_t>(lane < kLanes ? lane : 0)});
+}
+
+uint8_t Session::LaneOf(uint16_t msgId) const {
+    for (auto it = lanes_.rbegin(); it != lanes_.rend(); ++it)
+        if (msgId >= it->first && msgId <= it->last) return it->lane;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// pings and the session clock (docs/protocol.md "Session clock")
+
+double Session::LocalClock() const { return Now() + cfg_.testClockSkewS; }
+
+double Session::SessionTime() const {
+    if (state_ == SessionState::Hosting || !clockSynced_) return LocalClock();
+    return LocalClock() + clockOffset_;
+}
+
+void Session::SendPing(double now) {
+    if (pingBurst_ > 0) --pingBurst_;
+    const uint32_t stamp = NowMs();
+    pingSent_[stamp % pingSent_.size()] = {stamp, now};
+    ByteWriter w(8);
+    w.U8(kPing);
+    w.U32(stamp);
+    if (state_ == SessionState::Hosting) {
+        for (auto& p : players_)
+            if (p.id != kHostPlayer) SendRaw(p.peer, w, Reliability::Unreliable);
+    } else if (state_ == SessionState::Connected) {
+        SendRaw(hostPeer_, w, Reliability::Unreliable);
+    }
+}
+
+// Pong: u32 the ping's stamp, then (protocol 9) u64 the answering side's clock in microseconds when it answered.
+void Session::OnPong(ByteReader& r, PlayerInfo* from) {
+    const uint32_t t = r.U32();
+    if (!r.Ok()) return;
+    const double recvAt = Now();
+    const float rtt = static_cast<float>(NowMs() - t);
+    if (from) {
+        from->rttMs = from->rttMs <= 0 ? rtt : from->rttMs * 0.8f + rtt * 0.2f;
+    } else {
+        for (auto& p : players_)
+            if (p.id == localId_ || p.id == kHostPlayer) p.rttMs = (p.rttMs <= 0 ? rtt : p.rttMs * 0.8f + rtt * 0.2f);
+    }
+    if (r.Remaining() < 8 || state_ != SessionState::Connected) return;  // older peer / host: no clock
+    const uint64_t remoteUs = r.U64();
+    const auto& sent = pingSent_[t % pingSent_.size()];
+    if (sent.first != t || sent.second <= 0) return;  // not ours, or overwritten
+    ClockSample(sent.second, recvAt, static_cast<double>(remoteUs) / 1e6);
+}
+
+// One NTP-like sample: the host's clock read at the middle of the round trip. The offset of the sample with the
+// shortest round trip among the recent ones is the estimate (least queueing, least asymmetry), smoothed a little.
+void Session::ClockSample(double sentAt, double recvAt, double remoteClock) {
+    const double rtt = recvAt - sentAt;
+    if (rtt < 0 || rtt > 5.0) return;
+    const double skew = cfg_.testClockSkewS;
+    const double offset = remoteClock - ((sentAt + recvAt) / 2 + skew);
+    clockSamples_[clockNext_] = {offset, rtt, recvAt};
+    clockNext_ = (clockNext_ + 1) % clockSamples_.size();
+    const ClockSampleRec* best = nullptr;
+    for (const auto& s : clockSamples_)
+        if (s.at >= 0 && recvAt - s.at <= kClockSampleMaxAge && (!best || s.rtt < best->rtt)) best = &s;
+    if (!best) return;
+    if (!clockSynced_ || std::fabs(best->offset - clockOffset_) > 0.25) {
+        if (clockSynced_)
+            Log(kInfo, "session: clock offset jumped %.1f ms (to %.1f ms)", (best->offset - clockOffset_) * 1000,
+                best->offset * 1000);
+        clockOffset_ = best->offset;
+        if (!clockSynced_)
+            Log(kInfo, "session: clock synced to the host: offset %.3f s (+-%.1f ms)", best->offset,
+                best->rtt * 500);
+        clockSynced_ = true;
+    } else {
+        clockOffset_ += (best->offset - clockOffset_) * 0.3;
+    }
+    clockErrMs_ = static_cast<float>(best->rtt * 500);
 }
 
 void Session::OnEvent(const Event& e) {
@@ -751,19 +849,16 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
         case kPing: {
             uint32_t t = r.U32();
             if (!r.Ok()) return;
-            ByteWriter w(8);
+            ByteWriter w(16);
             w.U8(kPong);
             w.U32(t);
+            w.U64(static_cast<uint64_t>(std::max(0.0, LocalClock()) * 1e6));
             SendRaw(peer, w, Reliability::Unreliable);
             break;
         }
-        case kPong: {
-            uint32_t t = r.U32();
-            if (!r.Ok()) return;
-            float rtt = static_cast<float>(NowMs() - t);
-            from->rttMs = from->rttMs <= 0 ? rtt : from->rttMs * 0.8f + rtt * 0.2f;
+        case kPong:
+            OnPong(r, from);
             break;
-        }
         case kChat: {
             r.U8();  // claimed sender, ignored
             std::string text = r.Str(kMaxChatLen);
@@ -809,13 +904,14 @@ void Session::HostOnMessage(PeerId peer, ByteReader& r, Reliability ch) {
                 ByteWriter w = AppHeader(id, fid, target, rel);
                 w.Bytes(payload);
                 int copies = 0, failed = 0;
+                const uint8_t lane = LaneOf(id);
                 if (target == kAllPlayers) {
-                    BroadcastRaw(w, rel, fid);
+                    BroadcastRaw(w, rel, fid, lane);
                     copies = lastCopies_;
                     failed = lastFailed_;
                 } else if (PlayerInfo* to = FindMutable(target); to && to->id != kHostPlayer && to->id != fid) {
                     copies = 1;
-                    failed = SendRaw(to->peer, w, rel) ? 0 : 1;
+                    failed = SendRaw(to->peer, w, rel, lane) ? 0 : 1;
                 }
                 MsgTraffic& t = traffic_[id];
                 t.relayedMsgs += static_cast<uint64_t>(copies - failed);
@@ -984,21 +1080,16 @@ void Session::GuestOnMessage(ByteReader& r) {
         case kPing: {
             uint32_t t = r.U32();
             if (!r.Ok()) return;
-            ByteWriter w(8);
+            ByteWriter w(16);
             w.U8(kPong);
             w.U32(t);
+            w.U64(static_cast<uint64_t>(std::max(0.0, LocalClock()) * 1e6));
             SendRaw(hostPeer_, w, Reliability::Unreliable);
             break;
         }
-        case kPong: {
-            uint32_t t = r.U32();
-            if (!r.Ok()) return;
-            float rtt = static_cast<float>(NowMs() - t);
-            for (auto& p : players_)
-                if (p.id == localId_ || p.id == kHostPlayer)
-                    p.rttMs = (p.rttMs <= 0 ? rtt : p.rttMs * 0.8f + rtt * 0.2f);
+        case kPong:
+            OnPong(r, nullptr);
             break;
-        }
         case kPingTable: {
             uint8_t n = r.U8();
             for (int i = 0; i < n && r.Ok(); ++i) {
@@ -1093,6 +1184,8 @@ void Session::GuestOnWelcome(ByteReader& r) {
     welcomed_ = true;
     const bool reconnect = state_ == SessionState::Reconnecting;
     state_ = SessionState::Connected;
+    pingBurst_ = kPingBurst;  // sync the session clock now (and measure the round trip)
+    lastPing_ = 0;
     if (!reconnect) {
         localId_ = me;
         Log(kInfo, "session: joined as player %u (%zu players)", me, players_.size());
@@ -1225,7 +1318,7 @@ bool Session::SendToHost(uint16_t msgId, std::span<const uint8_t> payload, Relia
     if (state_ != SessionState::Connected) return false;
     ByteWriter w = AppHeader(msgId, localId_, kHostPlayer, rel);
     w.Bytes(payload);
-    const bool ok = SendRaw(hostPeer_, w, rel);
+    const bool ok = SendRaw(hostPeer_, w, rel, LaneOf(msgId));
     CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
     return ok;
 }
@@ -1235,11 +1328,11 @@ bool Session::Broadcast(uint16_t msgId, std::span<const uint8_t> payload, Reliab
     ByteWriter w = AppHeader(msgId, localId_, kAllPlayers, rel);
     w.Bytes(payload);
     if (state_ == SessionState::Hosting) {
-        const bool ok = BroadcastRaw(w, rel, kHostPlayer);
+        const bool ok = BroadcastRaw(w, rel, kHostPlayer, LaneOf(msgId));
         CountSent(msgId, w.Size(), lastCopies_, lastFailed_);
         return ok;
     }
-    const bool ok = SendRaw(hostPeer_, w, rel);
+    const bool ok = SendRaw(hostPeer_, w, rel, LaneOf(msgId));
     CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
     return ok;
 }
@@ -1255,9 +1348,9 @@ bool Session::SendTo(PlayerId player, uint16_t msgId, std::span<const uint8_t> p
     bool ok;
     if (state_ == SessionState::Hosting) {
         PlayerInfo* p = FindMutable(player);
-        ok = p && SendRaw(p->peer, w, rel);
+        ok = p && SendRaw(p->peer, w, rel, LaneOf(msgId));
     } else {
-        ok = SendRaw(hostPeer_, w, rel);  // host delivers (player 0) or relays
+        ok = SendRaw(hostPeer_, w, rel, LaneOf(msgId));  // host delivers (player 0) or relays
     }
     CountSent(msgId, w.Size(), 1, ok ? 0 : 1);
     return ok;
@@ -1285,19 +1378,20 @@ bool Session::SendChat(std::string_view text) {
 // ---------------------------------------------------------------------------------------------------------------
 // helpers
 
-bool Session::SendRaw(PeerId peer, const ByteWriter& w, Reliability rel) {
+bool Session::SendRaw(PeerId peer, const ByteWriter& w, Reliability rel, uint8_t lane) {
     if (!peer) return false;
+    if (lane && rel == Reliability::Reliable) return transport_.SendOnLane(peer, w.Span(), rel, lane);
     return transport_.Send(peer, w.Span(), rel);
 }
 
-bool Session::BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except) {
+bool Session::BroadcastRaw(const ByteWriter& w, Reliability rel, PlayerId except, uint8_t lane) {
     lastCopies_ = lastFailed_ = 0;
     size_t limit = rel == Reliability::Reliable ? kMaxReliableMessage : kMaxUnreliableMessage;
     bool ok = true;
     for (auto& p : players_) {
         if (p.id == kHostPlayer || p.id == except) continue;
         ++lastCopies_;
-        const bool sent = w.Size() <= limit && SendRaw(p.peer, w, rel);
+        const bool sent = w.Size() <= limit && SendRaw(p.peer, w, rel, lane);
         if (!sent) ++lastFailed_;
         ok &= sent;
     }

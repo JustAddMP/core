@@ -80,14 +80,14 @@ struct SteamTransport::Impl {
         events.push_back({t, id, r, ch, std::move(d)});
     }
 
-    bool Raw(PeerId to, uint8_t ctrl, std::span<const uint8_t> body, int sendType) {
+    bool Raw(PeerId to, uint8_t ctrl, std::span<const uint8_t> body, int sendType, int lane = 0) {
         std::vector<uint8_t> buf;
         buf.reserve(body.size() + 2);
         buf.push_back(kMagic);
         buf.push_back(ctrl);
         buf.insert(buf.end(), body.begin(), body.end());
         bool ok = api().Net_SendP2PPacket(api().networking, to, buf.data(), static_cast<uint32_t>(buf.size()),
-                                          sendType, opt.channel);
+                                          sendType, opt.channel + lane);
         if (ok) {
             auto it = peers.find(to);
             if (it != peers.end()) {
@@ -146,17 +146,20 @@ struct SteamTransport::Impl {
         Drop(from, p->state == PeerState::Connected ? DisconnectReason::Error : DisconnectReason::ConnectFailed);
     }
 
+    // Our channel first (control, unreliable, lane 0), then the lane channels (reliable data of lanes > 0).
     void Receive() {
-        uint32_t size = 0;
-        for (int guard = 0; guard < 4096 && api().Net_IsP2PPacketAvailable(api().networking, &size, opt.channel);
-             ++guard) {
-            rx.resize(std::max<uint32_t>(size, 1));
-            uint64_t from = 0;
-            uint32_t got = 0;
-            if (!api().Net_ReadP2PPacket(api().networking, rx.data(), static_cast<uint32_t>(rx.size()), &got, &from,
-                                         opt.channel))
-                break;
-            OnPacket(from, rx.data(), got);
+        for (int lane = 0; lane < kLanes; ++lane) {
+            const int ch = opt.channel + lane;
+            uint32_t size = 0;
+            for (int guard = 0; guard < 4096 && api().Net_IsP2PPacketAvailable(api().networking, &size, ch); ++guard) {
+                rx.resize(std::max<uint32_t>(size, 1));
+                uint64_t from = 0;
+                uint32_t got = 0;
+                if (!api().Net_ReadP2PPacket(api().networking, rx.data(), static_cast<uint32_t>(rx.size()), &got,
+                                             &from, ch))
+                    break;
+                OnPacket(from, rx.data(), got);
+            }
         }
     }
 
@@ -365,15 +368,26 @@ PeerId SteamTransport::Connect(std::string_view address) {
 }
 
 bool SteamTransport::Send(PeerId id, std::span<const uint8_t> data, Reliability rel) {
+    return SendOnLane(id, data, rel, 0);
+}
+
+bool SteamTransport::SendOnLane(PeerId id, std::span<const uint8_t> data, Reliability rel, uint8_t lane) {
     Impl& m = *impl_;
     Peer* p = m.Find(id);
     if (!p || p->state != PeerState::Connected) return false;
     if (rel == Reliability::Unreliable) {
         if (data.size() > kMaxUnreliableMessage) return false;
-        return m.Raw(id, kDataUnreliable, data, steam::k_EP2PSendUnreliable);
+        // NoDelay: the connection is up (our CONNECT/ACCEPT went through), and a state that cannot go out at once is
+        // better dropped than sent late behind newer ones (docs/protocol.md "Latency").
+        // Only once a pong came back: pongs are sent NoDelay too, so that proves the flag gets through this
+        // connection; before that (and if it never does) the plain unreliable send.
+        return m.Raw(id, kDataUnreliable, data,
+                     p->srtt >= 0 ? steam::k_EP2PSendUnreliableNoDelay : steam::k_EP2PSendUnreliable);
     }
     if (data.size() > kMaxReliableMessage) return false;
-    return m.Raw(id, kDataReliable, data, steam::k_EP2PSendReliable);
+    // k_EP2PSendReliable has no Nagle buffering (that is k_EP2PSendReliableWithBuffering). Lanes > 0 go on their own
+    // channel so Steam can deliver them independently (UNVERIFIED whether its reliable ordering is per channel).
+    return m.Raw(id, kDataReliable, data, steam::k_EP2PSendReliable, lane < kLanes ? lane : 0);
 }
 
 void SteamTransport::Poll(const EventHandler& handler) {

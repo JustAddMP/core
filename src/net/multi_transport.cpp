@@ -43,6 +43,15 @@ bool MultiTransport::Send(PeerId peer, std::span<const uint8_t> data, Reliabilit
     return t && t->Send(peer, data, rel);
 }
 
+bool MultiTransport::SendOnLane(PeerId peer, std::span<const uint8_t> data, Reliability rel, uint8_t lane) {
+    Transport* t = Owner(peer);
+    return t && t->SendOnLane(peer, data, rel, lane);
+}
+
+void MultiTransport::Flush() {
+    for (auto& p : _parts) p->Flush();
+}
+
 void MultiTransport::Poll(const EventHandler& handler) {
     for (size_t i = 0; i < _parts.size(); ++i) {
         _parts[i]->Poll([&](const Event& e) {
