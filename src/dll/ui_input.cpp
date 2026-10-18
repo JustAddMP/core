@@ -9,7 +9,9 @@
 #include <dinput.h>
 #include <xinput.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <vector>
@@ -51,7 +53,13 @@ std::atomic<bool> _guard{false};  // capture ended, keys still down
 std::atomic<ULONGLONG> _guardUntil{0};  // keep blocking a little after the keys came up (buffered DirectInput)
 constexpr ULONGLONG kGuardTailMs = 250;
 std::atomic<HWND> _hwnd{nullptr};
-std::atomic<uint16_t> _pad{0};
+// Buttons held per XInput user, from the game's reads and ours (0 when the read failed: unplugged). The release guard
+// waits for all of them.
+constexpr DWORD kUsers = 4;  // XUSER_MAX_COUNT
+std::atomic<uint16_t> _pad[kUsers] = {};
+// Changes whenever blocking starts or ends: added to the XInput packet number the game sees, so it never skips the
+// switch to the empty state (or back) as "unchanged".
+std::atomic<DWORD> _blockEpoch{0};
 
 struct RawEvent {
     Event e;
@@ -63,7 +71,9 @@ std::deque<RawEvent> _events;
 bool AnyHeld() {
     for (int vk : {VK_ESCAPE, VK_RETURN, VK_SPACE, VK_BACK, VK_LBUTTON, VK_UP, VK_DOWN})
         if (GetAsyncKeyState(vk) & 0x8000) return true;
-    return (_pad.load() & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) != 0;
+    for (const auto& p : _pad)
+        if (p.load() & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) return true;
+    return false;
 }
 
 bool BlockNow() {
@@ -75,7 +85,7 @@ bool BlockNow() {
             return true;
         }
         if (now < _guardUntil.load()) return true;
-        _guard = false;
+        if (_guard.exchange(false)) ++_blockEpoch;
     }
     return false;
 }
@@ -107,9 +117,64 @@ ULONGLONG _keyUntil = 0;   // held until then
 bool _keyPressQueued = false, _keyReleaseQueued = false;  // buffered events still to hand out
 DWORD _keySeq = 0x40000000;
 
+// Joysticks, gamepads, wheels, flight sticks, 1st-person controllers, supplemental devices (pedals...).
+bool IsJoystick(BYTE type) {
+    return (type >= DI8DEVTYPE_JOYSTICK && type <= DI8DEVTYPE_1STPERSON) || type == DI8DEVTYPE_SUPPLEMENTAL;
+}
+
+// DirectInput joysticks / gamepads (DIJOYSTATE / DIJOYSTATE2): the axes of the last unblocked read, per device, so
+// a blocked read can hand them back unchanged (an axis of 0 is pushed to its end, not centred).
+std::mutex _joyMutex;
+struct JoyAxes {
+    void* dev;
+    LONG axes[8];  // lX lY lZ lRx lRy lRz rglSlider[2]
+};
+std::vector<JoyAxes> _joyAxes;
+
+void BlockJoystickState(void* self, DWORD size, void* data) {
+    auto* js = static_cast<DIJOYSTATE*>(data);
+    {
+        std::lock_guard lock(_joyMutex);
+        for (const auto& j : _joyAxes)
+            if (j.dev == self) std::memcpy(&js->lX, j.axes, sizeof(j.axes));
+    }
+    for (DWORD& pov : js->rgdwPOV) pov = 0xFFFFFFFF;  // centred
+    std::memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+    if (size >= sizeof(DIJOYSTATE2)) {  // DIJOYSTATE2: 128 buttons, then velocities / accelerations / forces
+        auto* js2 = static_cast<DIJOYSTATE2*>(data);
+        std::memset(js2->rgbButtons, 0, sizeof(js2->rgbButtons));
+        std::memset(&js2->lVX, 0, size - offsetof(DIJOYSTATE2, lVX));
+    }
+}
+
+void RememberJoystickAxes(void* self, const void* data) {
+    const auto* js = static_cast<const DIJOYSTATE*>(data);
+    std::lock_guard lock(_joyMutex);
+    for (auto& j : _joyAxes)
+        if (j.dev == self) {
+            std::memcpy(j.axes, &js->lX, sizeof(j.axes));
+            return;
+        }
+    if (_joyAxes.size() >= 16) return;
+    JoyAxes j{self, {}};
+    std::memcpy(j.axes, &js->lX, sizeof(j.axes));
+    _joyAxes.push_back(j);
+}
+
 HRESULT STDMETHODCALLTYPE StateDetour(GetDeviceStateFn orig, void* self, DWORD size, void* data) {
     const HRESULT hr = orig(self, size, data);
-    if (SUCCEEDED(hr) && data && BlockNow()) std::memset(data, 0, size);
+    if (SUCCEEDED(hr) && data) {
+        const bool joyLayout = size == sizeof(DIJOYSTATE) || size == sizeof(DIJOYSTATE2);
+        const bool joystick = joyLayout && IsJoystick(DeviceType(self));
+        if (BlockNow()) {
+            if (joystick)
+                BlockJoystickState(self, size, data);
+            else
+                std::memset(data, 0, size);
+        } else if (joystick) {
+            RememberJoystickAxes(self, data);
+        }
+    }
     if (SUCCEEDED(hr) && data && size >= 256 && !BlockNow()) {
         std::lock_guard lock(_keyMutex);
         if (_keyDik && GetTickCount64() < _keyUntil && DeviceType(self) == DI8DEVTYPE_KEYBOARD)
@@ -158,12 +223,16 @@ HRESULT DataDetour(GetDeviceDataFn orig, void* self, DWORD objSize, DIDEVICEOBJE
     }
     // Drop presses and mouse movement; keep key/button releases, so a key that was down when capture began is
     // not left "stuck" in the game's input state.
-    const bool keyboard = DeviceType(self) == DI8DEVTYPE_KEYBOARD;
+    // Joysticks: only their buttons (DIJOFS_BUTTON0..127) count as buttons; their axes and POVs are dropped.
+    const BYTE type = DeviceType(self);
+    const bool keyboard = type == DI8DEVTYPE_KEYBOARD;
+    const bool joystick = IsJoystick(type);
     DWORD kept = 0;
     auto* bytes = reinterpret_cast<uint8_t*>(data);
     for (DWORD i = 0; i < *inOut; ++i) {
         auto* ev = reinterpret_cast<DIDEVICEOBJECTDATA*>(bytes + static_cast<size_t>(i) * objSize);
-        const bool isButton = keyboard || ev->dwOfs >= DIMOFS_BUTTON0;
+        const bool isButton = keyboard || (joystick ? ev->dwOfs >= DIJOFS_BUTTON0 && ev->dwOfs < DIJOFS_BUTTON(128)
+                                                    : ev->dwOfs >= DIMOFS_BUTTON0);
         if (isButton && !(ev->dwData & 0x80)) {
             if (kept != i) std::memmove(bytes + static_cast<size_t>(kept) * objSize, ev, objSize);
             ++kept;
@@ -223,9 +292,10 @@ DWORD WINAPI XInputCapsDetour(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps
 
 DWORD WINAPI XInputDetour(DWORD user, XINPUT_STATE* state) {
     const DWORD r = ReadPad(user, state);
+    if (user < kUsers) _pad[user] = r == ERROR_SUCCESS && state ? state->Gamepad.wButtons : 0;
     if (r == ERROR_SUCCESS && state) {
-        if (user == 0) _pad = state->Gamepad.wButtons;
         if (BlockNow()) std::memset(&state->Gamepad, 0, sizeof(state->Gamepad));
+        state->dwPacketNumber += _blockEpoch.load() * 0x10000u;
     }
     return r;
 }
@@ -309,6 +379,7 @@ void SetWindow(void* hwnd) { _hwnd = static_cast<HWND>(hwnd); }
 void SetCapture(bool on) {
     const bool was = _capture.exchange(on);
     if (was && !on) _guard = true;
+    if (on && !was) ++_blockEpoch;  // blocking starts (when it ends, BlockNow bumps it after the release guard)
     if (on != was) {
         std::lock_guard lock(_mutex);
         _events.clear();
@@ -387,22 +458,68 @@ bool PopEvent(Event* out) {
     return true;
 }
 
-uint8_t PadLeftTrigger() {
-    if (!_origXInput) return 0;
-    XINPUT_STATE st{};
-    if (ReadPad(0, &st) != ERROR_SUCCESS) return 0;
-    return st.Gamepad.bLeftTrigger;
+// Our own reads of every user: which are connected, when an empty slot is probed next.
+struct PadSlots {
+    bool connected[kUsers] = {};
+    ULONGLONG nextProbe[kUsers] = {};
+    ULONGLONG cachedAt = 0;  // ReadPads runs several times a frame: the pads are read once per tick (~16 ms)
+    PadSnapshot cached;
+};
+PadSlots& Slots() {
+    static PadSlots s;
+    return s;
+}
+constexpr ULONGLONG kProbeEmptyMs = 1000;
+
+PadSnapshot ReadPads() {
+    PadSnapshot out;
+    if (!_origXInput) return out;
+    static std::mutex m;  // the game layer may ask from its own thread too
+    std::lock_guard lock(m);
+    PadSlots& sl = Slots();
+    const ULONGLONG now = GetTickCount64();
+    if (sl.cachedAt == now) return sl.cached;
+    int best = -1;
+    for (DWORD u = 0; u < kUsers; ++u) {
+        // the test pad lives on user 0 and is always "connected" while enabled
+        const bool test = u == 0 && _testPadEnabled.load();
+        if (!sl.connected[u] && !test && now < sl.nextProbe[u]) continue;
+        XINPUT_STATE st{};
+        const bool ok = ReadPad(u, &st) == ERROR_SUCCESS;
+        _pad[u] = ok ? st.Gamepad.wButtons : 0;
+        if (ok != sl.connected[u]) {
+            sl.connected[u] = ok;
+            if (!test) MC_LOG_INFO("ui_input: gamepad %lu %s", u, ok ? "connected" : "disconnected");
+        }
+        if (!ok) {
+            sl.nextProbe[u] = now + kProbeEmptyMs;
+            continue;
+        }
+        const XINPUT_GAMEPAD& g = st.Gamepad;
+        out.connected |= static_cast<uint8_t>(1u << u);
+        out.buttons |= g.wButtons;
+        out.leftTrigger = std::max(out.leftTrigger, g.bLeftTrigger);
+        out.rightTrigger = std::max(out.rightTrigger, g.bRightTrigger);
+        const int mag = std::max(std::abs(static_cast<int>(g.sThumbLX)), std::abs(static_cast<int>(g.sThumbLY)));
+        if (mag > best) {
+            best = mag;
+            out.lx = g.sThumbLX;
+            out.ly = g.sThumbLY;
+        }
+    }
+    sl.cachedAt = now;
+    sl.cached = out;
+    return out;
 }
 
+uint8_t PadLeftTrigger() { return ReadPads().leftTrigger; }
+
 uint16_t PadButtons() {
-    if (!_origXInput) return 0;
-    XINPUT_STATE st{};
-    if (ReadPad(0, &st) != ERROR_SUCCESS) return 0;
-    _pad = st.Gamepad.wButtons;
-    uint16_t b = st.Gamepad.wButtons;
+    const PadSnapshot p = ReadPads();
+    uint16_t b = p.buttons;
     constexpr SHORT kStick = 16000;  // left stick up/down counts as the d-pad
-    if (st.Gamepad.sThumbLY > kStick) b |= XINPUT_GAMEPAD_DPAD_UP;
-    if (st.Gamepad.sThumbLY < -kStick) b |= XINPUT_GAMEPAD_DPAD_DOWN;
+    if (p.ly > kStick) b |= XINPUT_GAMEPAD_DPAD_UP;
+    if (p.ly < -kStick) b |= XINPUT_GAMEPAD_DPAD_DOWN;
     return b;
 }
 

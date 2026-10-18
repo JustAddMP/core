@@ -46,6 +46,30 @@ public:
     static void Leave();
     static bool InviteFriends();     // Steam overlay invite dialog for our lobby (hosting over Steam)
     static bool OpenSteamFriends();  // Steam overlay friends list (Join Game / invites)
+
+    // ---- JOIN FRIEND (net/steam_friends.h) ----
+    struct FriendRow {
+        uint64_t steamId = 0;
+        std::string name;
+        std::string detail;     // "HOSTING (2/4) - IN THE LOBBY", "PLAYING, NOT HOSTING", "VERSION 0.13.0 - ..."
+        bool joinable = false;
+        bool warn = false;      // another version / full: shown as a problem
+        bool playing = false;   // the host is in the world (mode = what it plays)
+        int mode = -1;
+    };
+    struct FriendList {
+        bool steamReady = false;
+        bool available = false;  // the friends-list API exists (else only the Steam overlay)
+        bool scanned = false;    // at least one scan done
+        int friends = 0, online = 0;
+        std::vector<FriendRow> rows;  // friends in this game; joinable first
+    };
+    // Rescans at most once a second; call while the JOIN FRIEND panel is open.
+    static FriendList GetFriends();
+    static void RefreshFriends();  // forget the cached state, ask Steam again
+    // Join the co-op game of a friend from GetFriends (their lobby: theirs, or the host's when they are a guest).
+    // False with a notice when it cannot be joined (not hosting, other version, full, gone).
+    static bool JoinFriend(uint64_t steamId);
     // Session password. Host side: "" = none; applies to the running host session too (players in it stay).
     static void SetPassword(const std::string& password);
     // Guest side: the last join was refused for its password (required / wrong); true once per refusal, so the UI

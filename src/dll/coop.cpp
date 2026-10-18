@@ -10,6 +10,7 @@
 #include "net/net_monitor.h"
 #include "net/session.h"
 #include "net/steam_flat.h"
+#include "net/steam_friends.h"
 #include "net/steam_lobby.h"
 #include "net/steam_transport.h"
 #include "net/udp_transport.h"
@@ -79,6 +80,8 @@ struct State {
     uint64_t steamId = 0;
     std::string persona;
     net::SteamLobby lobby;
+    net::FriendGames friends;    // JOIN FRIEND list (scanned only while the UI asks for it)
+    std::string joinFriendName;  // JOIN FRIEND: whose game we are joining (status line / messages)
 
     // session
     std::unique_ptr<net::Transport> net;
@@ -301,11 +304,15 @@ void UpdateSteamLobbyData() {
         return;
     const bool playing = s.gameLobby.InGame();
     const std::string mode = std::to_string(playing ? s.gameLobby.GameMode() : s.gameLobby.Mode());
-    const std::string state = std::string(playing ? "playing" : "lobby") + "|" + mode;
+    // mc_players / mc_max: JOIN FRIEND shows "2/4" and "full" before anyone tries (net/steam_friends.h)
+    const std::string players = std::to_string(s.session->Players().size());
+    const std::string state = std::string(playing ? "playing" : "lobby") + "|" + mode + "|" + players;
     if (state == s.steamLobbyState) return;
     s.steamLobbyState = state;
     s.lobby.SetData("mc_state", playing ? "playing" : "lobby");
     s.lobby.SetData("mc_mode", mode.c_str());
+    s.lobby.SetData("mc_players", players.c_str());
+    s.lobby.SetData("mc_max", std::to_string(net::kMaxPlayers).c_str());
 }
 
 void MakeSession(std::unique_ptr<net::Transport> transport) {
@@ -416,7 +423,9 @@ void StartLobbyJoin(uint64_t lobbyId) {
     s.mode = Mode::JoinLobby;
     s.lobbyId = lobbyId;
     s.started = true;
-    s.target = "Steam lobby " + std::to_string(lobbyId);
+    s.target = s.joinFriendName.empty() ? "Steam lobby " + std::to_string(lobbyId) : s.joinFriendName;
+    MC_LOG_INFO("coop: joining Steam lobby %llu%s%s", static_cast<unsigned long long>(lobbyId),
+                s.joinFriendName.empty() ? "" : " of friend ", s.joinFriendName.c_str());
     if (!s.lobby.Join(lobbyId)) Fail("could not join Steam lobby " + std::to_string(lobbyId));
 }
 
@@ -439,6 +448,7 @@ void HandleJoinRequest() {
         return;
     }
     Notify("CO-OP", "Joining your friend's game...");
+    s.joinFriendName.clear();
     if (s.session) {
         MC_LOG_INFO("coop: leaving the current session to follow the invite");
         GetGameModule().OnSessionEnd();
@@ -496,7 +506,23 @@ void InitSteam() {
                     static_cast<unsigned long long>(id));
     };
     s.lobby.onJoined = [](uint64_t, uint64_t host) {
-        if (S().mode == Mode::JoinLobby && !S().session) JoinSteamHost(host);
+        State& st = S();
+        if (st.mode != Mode::JoinLobby || st.session) return;
+        // Same release on both sides, or the host refuses the handshake anyway: say so before connecting (invites
+        // and JOIN FRIEND alike).
+        const std::string theirs = st.lobby.GetData("mc_version");
+        const std::string ours = GetGameInfo().modVersion;
+        if (!theirs.empty() && theirs != ours) {
+            std::string who = st.lobby.PersonaName(host);
+            if (who.empty() || who == "[unknown]") who = "The host";
+            return Fail(who + " runs " + GetGameInfo().modName + " " + theirs + ", you have " + ours +
+                        ". Both players need the same version.");
+        }
+        const std::string proto = st.lobby.GetData("mc_proto");
+        if (!proto.empty() && proto != std::to_string(net::kProtocolVersion))
+            return Fail("The host runs another " + std::string(GetGameInfo().modName) + " build (protocol " + proto +
+                        ", yours " + std::to_string(net::kProtocolVersion) + "). Both players need the same version.");
+        JoinSteamHost(host);
     };
     s.lobby.onFailed = [](const std::string& why) {
         if (S().mode == Mode::JoinLobby && !S().session)
@@ -505,6 +531,8 @@ void InitSteam() {
             MC_LOG_WARN("coop: Steam lobby: %s", why.c_str());
     };
     s.lobby.onJoinRequested = &OnJoinRequested;
+    s.friends.Configure(api.Utils_GetAppID(api.utils), gi.modVersion, net::kProtocolVersion, s.steamId);
+    if (!s.friends.Available()) MC_LOG_WARN("coop: Steam friends list not available: JOIN FRIEND opens the overlay");
     s.lobby.onMemberChanged = [](uint64_t id, bool joined) {
         MC_LOG_INFO("coop: lobby member %llu '%s' %s", static_cast<unsigned long long>(id),
                     S().lobby.PersonaName(id).c_str(), joined ? "joined" : "left");
@@ -694,6 +722,7 @@ void Coop::Host() {
     State& s = S();
     MC_LOG_INFO("coop: host requested from the menu");
     StopCurrent();
+    s.joinFriendName.clear();
     s.mode = Mode::Host;
     s.started = false;  // TryStart (waits for Steam if it is still starting)
 }
@@ -702,6 +731,7 @@ void Coop::JoinAddress(const std::string& address) {
     State& s = S();
     MC_LOG_INFO("coop: join '%s' requested from the menu", address.c_str());
     StopCurrent();
+    s.joinFriendName.clear();
     s.mode = Mode::JoinUdp;
     s.address = address;
     s.lastAddress = address;
@@ -710,6 +740,7 @@ void Coop::JoinAddress(const std::string& address) {
 
 void Coop::JoinLobby(uint64_t lobbyId) {
     State& s = S();
+    MC_LOG_INFO("coop: join Steam lobby %llu requested", static_cast<unsigned long long>(lobbyId));
     StopCurrent();
     s.mode = Mode::JoinLobby;
     s.lobbyId = lobbyId;
@@ -734,6 +765,84 @@ bool Coop::InviteFriends() {
     if (s.lobby.OpenInviteDialog()) return true;
     Notify("CO-OP", "Host a co-op game first, then invite friends", true);
     return false;
+}
+
+Coop::FriendList Coop::GetFriends() {
+    State& s = S();
+    FriendList out;
+    out.steamReady = s.steam == SteamState::Ready;
+    if (!out.steamReady) return out;
+    out.available = s.friends.Available();
+    s.friends.Update(s.now);
+    out.scanned = s.friends.Scanned();
+    out.friends = s.friends.FriendCount();
+    out.online = s.friends.OnlineCount();
+    const uint64_t ourLobby = s.lobby.GetState() == net::SteamLobby::State::InLobby ? s.lobby.LobbyId() : 0;
+    for (const auto& f : s.friends.List()) {
+        FriendRow r;
+        r.steamId = f.steamId;
+        r.name = f.name;
+        r.detail = net::FriendGameDetail(f, GetGameInfo().modVersion);
+        r.joinable = f.Joinable();
+        r.warn = f.status == net::FriendGame::Status::VersionMismatch || f.status == net::FriendGame::Status::Full;
+        r.playing = f.playing;
+        r.mode = f.mode;
+        if (ourLobby && f.lobby == ourLobby) {
+            r.joinable = false;
+            r.detail = "IN YOUR GAME";
+        }
+        out.rows.push_back(std::move(r));
+    }
+    return out;
+}
+
+void Coop::RefreshFriends() {
+    MC_LOG_INFO("coop: friends list refresh");
+    S().friends.Reset();
+}
+
+bool Coop::JoinFriend(uint64_t steamId) {
+    State& s = S();
+    if (s.steam != SteamState::Ready) {
+        Notify("JOIN FRIEND", "Steam is not available: use JOIN BY IP", true);
+        return false;
+    }
+    const net::FriendGame* f = s.friends.Find(steamId);
+    if (!f) {
+        Notify("JOIN FRIEND", "That friend is no longer playing", true);
+        return false;
+    }
+    const net::FriendGame fg = *f;  // copy: JoinLobby below ends the session, the list stays but be safe
+    MC_LOG_INFO("coop: JOIN FRIEND '%s' (%llu): status %d, lobby %llu, version '%s'", fg.name.c_str(),
+                static_cast<unsigned long long>(steamId), static_cast<int>(fg.status),
+                static_cast<unsigned long long>(fg.lobby), fg.version.c_str());
+    using St = net::FriendGame::Status;
+    switch (fg.status) {
+    case St::NotHosting:
+        Notify("JOIN FRIEND", fg.name + " is playing but not hosting. Ask them to choose CO-OP > HOST CO-OP GAME, "
+                                        "then try again (or let them invite you).",
+               true);
+        return false;
+    case St::VersionMismatch:
+        Notify("JOIN FRIEND",
+               fg.name + " runs " + GetGameInfo().modName + " " + (fg.version.empty() ? "?" : fg.version) +
+                   ", you have " + GetGameInfo().modVersion + ". Both players need the same version.",
+               true);
+        return false;
+    case St::Full: Notify("JOIN FRIEND", fg.name + "'s game is full.", true); return false;
+    default: break;
+    }
+    const uint64_t ourLobby = s.lobby.GetState() == net::SteamLobby::State::InLobby ? s.lobby.LobbyId() : 0;
+    if (ourLobby && fg.lobby == ourLobby) {
+        Notify("JOIN FRIEND", fg.name + " is already in your game.");
+        return false;
+    }
+    const std::string who = fg.status == St::InGame && !fg.hostName.empty() ? fg.hostName : fg.name;
+    JoinLobby(fg.lobby);  // ends what we were doing first
+    s.joinFriendName = who;
+    Notify("JOIN FRIEND", fg.status == St::InGame ? "Joining " + who + "'s game (with " + fg.name + ")..."
+                                                  : "Joining " + fg.name + "'s game...");
+    return true;
 }
 
 bool Coop::OpenSteamFriends() {

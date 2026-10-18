@@ -1,6 +1,7 @@
 // net: Steam lobby (ISteamMatchmaking009) + invites (ISteamFriends017).
-// Friends-only lobby, max 4. Lobby data: mc_version, mc_proto, mc_host. Rich presence "connect" =
-// "+connect_lobby <id>" so "Join Game" works from the friends list. Single-threaded: call Poll() each frame.
+// Friends-only lobby, max 4. Lobby data: mc_version, mc_proto, mc_host (+ mc_state, mc_mode, mc_players, mc_max from
+// Coop). Rich presence "connect" = "+connect_lobby <id>" (hosts and guests, refreshed every 30 s) so "Join Game"
+// works from the Steam friends list and JOIN FRIEND (net/steam_friends.h) finds the lobby. Single-threaded: call Poll() each frame.
 #pragma once
 #include <cstdint>
 #include <functional>
@@ -39,6 +40,8 @@ public:
     // Owner only, while in the lobby: lobby data friends see before joining (e.g. mc_state, mc_mode). False otherwise.
     bool SetData(const char* key, const char* value);
     std::string PersonaName(uint64_t steamId = 0) const;  // 0 = local user
+    // The EChatRoomEnterResponse of the last join (1 = success, 0 = none yet).
+    uint32_t LastEnterResponse() const { return lastEnterResponse_; }
 
     // Events (all on the Poll() thread).
     std::function<void(uint64_t lobbyId)> onCreated;
@@ -71,6 +74,8 @@ private:
     std::string modVersion_;
     uint32_t protocol_ = 0;
     std::string status_;
+    double presenceAt_ = 0;  // last SetPresence (refreshed while in a lobby)
+    uint32_t lastEnterResponse_ = 0;
     bool inited_ = false;
     std::vector<int> subs_;
 };

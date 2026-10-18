@@ -331,8 +331,10 @@ new peer dropped). Guests use a single transport.
 `SteamLobby` (ISteamMatchmaking009 + ISteamFriends017):
 
 - `Create(4)`: friends-only lobby, max 4. Lobby data `mc_version`, `mc_proto`, `mc_host` (host SteamID64),
-  joinable. Rich presence `connect = "+connect_lobby <lobbyId>"` and `status`, so "Join Game" in the friends list
-  works.
+  joinable; the dll adds `mc_state` (`lobby` / `playing`), `mc_mode`, `mc_players` and `mc_max` while hosting. Rich
+  presence `connect = "+connect_lobby <lobbyId>"` and `status` on the host and on every guest in the lobby, so "Join
+  Game" in the friends list works; set again every 30 s while in a lobby (the game's own steam_api instance runs for
+  the same app and user, and anything it clears must not take the join away).
 - `OpenInviteDialog()`: `ActivateGameOverlayInviteDialog(lobby)`.
 - Invite accepted from the overlay -> `GameLobbyJoinRequested_t` (333). "Join Game" while running ->
   `GameRichPresenceJoinRequested_t` (337) with the connect string. Game started by Steam via "Join Game" ->
@@ -341,7 +343,39 @@ new peer dropped). Guests use a single transport.
   `Session::Poll`, so the dll's handler only records the lobby id; `Coop::Tick` leaves the current session and joins
   at the start of the next tick, after Steam polling and before the session is polled.
 - `Join(id)` -> `LobbyEnter_t` -> host SteamID = lobby data `mc_host` (fallback: lobby owner) ->
-  `SteamTransport::Connect(hostSteamId)`.
+  `SteamTransport::Connect(hostSteamId)`. Before connecting, the dll compares the lobby's `mc_version` / `mc_proto`
+  with its own and stops with "<host> runs <mod> 0.13.0, you have 0.14.0. Both players need the same version."
+  (the handshake would refuse it anyway, less clearly). A failed `JoinLobby` is reported with its
+  `EChatRoomEnterResponse` in words (`LobbyEnterResponseText`: gone, private, full, banned, limited account,
+  blocked, rate limited).
+
+### JOIN FRIEND (net/steam_friends.h)
+
+The CO-OP page's JOIN FRIEND opens a list of the Steam friends who are playing this game (`FriendGames`,
+rescanned once a second while the panel is open, no callbacks):
+
+1. `GetFriendCount(k_EFriendFlagImmediate)` / `GetFriendByIndex`; `GetFriendPersonaState` only for the
+   "n online" count. Our own SteamID is skipped.
+2. `GetFriendGamePlayed`: offline friends and friends in another app are left out (`CGameID` app id = ours from
+   `ISteamUtils::GetAppID`, type 0). `FriendGameInfo_t::m_steamIDLobby` is the friend's lobby when Steam shows it to
+   us.
+3. No lobby there: the friend's rich presence `connect` (`+connect_lobby <id>`), asked for with
+   `RequestFriendRichPresence` (again after 10 s). Only chat-type SteamIDs (account type 8) count as lobbies.
+4. A lobby: `RequestLobbyData` (again after 5 s, counts change) and `GetLobbyData` for `mc_version`, `mc_proto`,
+   `mc_host`, `mc_state`, `mc_mode`, `mc_players`, `mc_max`.
+
+Each friend is then (`ClassifyFriendGame`): **hosting** (`mc_host` = the friend), **in a co-op game** (a guest:
+`mc_host` is someone else, shown by name; joining takes us into that host's lobby), **checking** (a lobby whose data
+has not arrived: joinable, the join itself checks the version), **playing, not hosting** (no lobby, or a lobby
+without `mc_version`), **other version** (`mc_version` or `mc_proto` differ), **full** (`mc_players` >= `mc_max`).
+Joinable ones are listed first. Picking one calls `Coop::JoinFriend`: hosting / in game / checking go through
+`Coop::JoinLobby` (the same path as an invite); the others only explain why not (a banner). A friend in our own
+lobby shows as "IN YOUR GAME". The list also offers REFRESH and STEAM FRIENDS LIST (the overlay, as before). Without
+Steam it says so; with no friend online / none playing it says that and how the friend can host or invite.
+
+Not verified with two real accounts yet: whether Steam fills `m_steamIDLobby` for a friends-only lobby created by our
+second steam_api instance (the rich presence path covers it if not), and whether `GetLobbyData` of a friends-only
+lobby we are not in answers after `RequestLobbyData` (if not, the friend stays "checking" and joining still works).
 
 ## Steam callbacks: approach and risks
 

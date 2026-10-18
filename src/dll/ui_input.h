@@ -7,7 +7,14 @@
 // our panels read the swallowed messages and the real pad state instead. After capture ends, blocking continues
 // until the confirm/back keys and pad buttons are released, so the key that closed our panel does not also act in
 // the game's menu.
+// Gamepads: every XInput user (0-3) counts, not only the first; a pad that is unplugged while a button is held no
+// longer counts as holding it. Each change between blocked and not blocked gives the game a new XInput packet
+// number, so a game that skips unchanged packets still sees the empty (or the real) state. DirectInput joysticks /
+// gamepads, if a game reads any, are blocked with centred POVs, released buttons and their axes frozen where they
+// were (not zeroed: 0 is an axis pushed to its end).
 #include <cstdint>
+
+#include "dll/pad_nav.h"
 
 namespace mc::ui_input {
 
@@ -30,10 +37,13 @@ bool PopEvent(Event* out);  // render thread
 // Dropped unless a panel captures input, like the window's own events. Any thread.
 void InjectEvent(const Event& e);
 
-// First gamepad (XInput user 0), buttons as XINPUT_GAMEPAD_* bits (left stick up/down reported as d-pad); 0 if
-// none. Render thread.
+// Every connected gamepad combined (buttons OR-ed, the left stick of the pad pushed furthest, the larger
+// triggers) for our panels (dll/pad_nav.h). Unplugged users are probed again once a second, not every frame
+// (XInputGetState on an empty slot is slow). Connects and disconnects are logged. Render thread.
+PadSnapshot ReadPads();
+// ReadPads' buttons as XINPUT_GAMEPAD_* bits, left stick up/down reported as d-pad; 0 if no pad. Render thread.
 uint16_t PadButtons();
-// First gamepad's left trigger (0..255), 0 if none. Render thread.
+// The largest left trigger of the connected pads (0..255), 0 if none. Render thread.
 uint8_t PadLeftTrigger();
 
 // Test pad, for automated tests (synthetic mouse clicks never reach some games; a pad does): a virtual gamepad on

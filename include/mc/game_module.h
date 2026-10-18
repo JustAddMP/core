@@ -20,7 +20,7 @@ namespace mc {
 enum class MenuCommand {
     Host,          // HOST CO-OP GAME
     Leave,         // STOP HOSTING / LEAVE CO-OP
-    JoinFriend,    // JOIN FRIEND (Steam overlay friends list)
+    JoinFriend,    // JOIN FRIEND (core's panel: Steam friends playing this game, net/steam_friends.h)
     JoinByIp,      // JOIN BY IP (opens core's text box)
     Invite,        // INVITE FRIENDS (Steam overlay)
     PausePanel,    // pause menu > CO-OP (opens core's co-op panel)

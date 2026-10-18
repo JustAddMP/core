@@ -46,15 +46,18 @@ struct Toast {
 // PlayerMenu: what to do with the guest picked in the CO-OP panel's player list (host only); ConfirmKick: "Kick
 // <name>?" before it happens.
 // Lobby: the pre-game lobby (players with character and ready state, mode, start); Settings: CO-OP SETTINGS (name,
-// debug overlay, the game's settings); Name: the text box for the player name.
-enum class Panel { None, PauseCoop, JoinIp, Password, PlayerMenu, ConfirmKick, Lobby, Settings, Name };
+// debug overlay, the game's settings); Name: the text box for the player name; Friends: JOIN FRIEND (Steam friends
+// playing this game and whether they host, Coop::GetFriends).
+enum class Panel { None, PauseCoop, JoinIp, Password, PlayerMenu, ConfirmKick, Lobby, Settings, Name, Friends };
 enum class Action {
     None, Host, Invite, JoinFriend, JoinIp, Leave, Back, Connect, SetPassword, ClearPassword, SubmitPassword,
     PickPlayer, Kick, KickBan, ConfirmKick, Option,
     // lobby
     Ready, Mode, Start, JoinGame, OpenLobby,
     // settings
-    OpenSettings, EditName, SubmitName, DebugOverlay, Setting
+    OpenSettings, EditName, SubmitName, DebugOverlay, Setting,
+    // JOIN FRIEND
+    PickFriend, RefreshFriends, SteamOverlay
 };
 
 struct Item {
@@ -64,6 +67,8 @@ struct Item {
     int player = -1;  // PickPlayer: the guest's player id (drawn as its row in the player list, not as an item)
     int option = -1;  // Option: index into the game's PanelOptions list
     std::string value;  // Option: its current value
+    uint64_t friendId = 0;  // PickFriend: the friend's SteamID
+    bool joinable = false, warn = false;  // PickFriend: how the row is drawn
 };
 
 struct UiState {
@@ -80,8 +85,9 @@ struct UiState {
     std::string targetName;
     bool targetBan = false;     // ConfirmKick: kick and ban
     float caret = 0;
-    uint16_t padPrev = 0;
-    float padRepeat = 0;
+    PadNav pad;  // gamepad navigation (dll/pad_nav.h): every connected pad, stick + d-pad, repeat
+    Coop::FriendList friends;  // Friends panel, refreshed every frame while open
+    int friendScroll = 0;      // first friend row shown
     render::DrawList list;
     Coop::Info info;
     float mouseX = -1, mouseY = -1;
@@ -328,12 +334,62 @@ bool Stepper(const Item& it) {
            it.action == Action::DebugOverlay || it.action == Action::EditName;
 }
 
+// JOIN FRIEND: one row per friend playing this game (joinable ones first), REFRESH, STEAM FRIENDS LIST, BACK.
+// Rebuilt every frame while open; the selection follows the same friend while the list changes.
+void BuildFriendItems() {
+    UiState& u = U();
+    uint64_t selFriend = 0;
+    Action selAction = Action::None;
+    if (u.selected >= 0 && u.selected < static_cast<int>(u.items.size())) {
+        selFriend = u.items[static_cast<size_t>(u.selected)].friendId;
+        selAction = u.items[static_cast<size_t>(u.selected)].action;
+    }
+    const bool hadRows = !u.friends.rows.empty();
+    u.friends = Coop::GetFriends();
+    u.items.clear();
+    std::vector<LobbyMode> modes;
+    GetGameModule().LobbyModes(modes);
+    for (const auto& r : u.friends.rows) {
+        Item it{r.name, Action::PickFriend};
+        it.friendId = r.steamId;
+        it.value = r.detail;
+        if (r.joinable && r.playing && r.mode >= 0 && static_cast<size_t>(r.mode) < modes.size())
+            it.value += " " + Upper(modes[static_cast<size_t>(r.mode)].name);
+        it.joinable = r.joinable;
+        it.warn = r.warn;
+        u.items.push_back(it);
+    }
+    u.items.push_back({"REFRESH", Action::RefreshFriends});
+    if (u.friends.steamReady) u.items.push_back({"STEAM FRIENDS LIST", Action::SteamOverlay});
+    u.items.push_back({"BACK", Action::Back});
+    // keep the selection: the same friend, else the same entry; the first friends to show up take a selection that
+    // still sits on the first entry
+    bool found = false;
+    for (size_t i = 0; i < u.items.size() && !found; ++i) {
+        const Item& it = u.items[i];
+        if (selFriend ? it.friendId == selFriend : (selAction != Action::None && it.action == selAction)) {
+            u.selected = static_cast<int>(i);
+            found = true;
+        }
+    }
+    if (!found && selFriend) u.selected = 0;  // that friend left the game: back to the top
+    if (!hadRows && !u.friends.rows.empty() && selAction == Action::RefreshFriends) u.selected = 0;
+    u.selected = std::clamp(u.selected, 0, static_cast<int>(u.items.size()) - 1);
+}
+
 void Open(Panel p, bool pwForHost = false) {
     UiState& u = U();
     u.panel = p;
     u.selected = 0;
     u.mouseX = u.mouseY = -1;
-    u.padPrev = ui_input::PadButtons();  // a held A (that opened us) is not a new press
+    u.pad.Reset(ui_input::ReadPads());  // a held A (that opened us) or a pushed stick is not a new press
+    if (p == Panel::Friends) {
+        Coop::RefreshFriends();
+        u.friends = {};
+        u.friendScroll = 0;
+        u.items.clear();
+        BuildFriendItems();
+    }
     if (p == Panel::PauseCoop) {
         u.items.clear();
         BuildPauseItems();
@@ -372,6 +428,7 @@ void Open(Panel p, bool pwForHost = false) {
                                        : p == Panel::Lobby      ? "lobby"
                                        : p == Panel::Settings   ? "settings"
                                        : p == Panel::Name       ? "name"
+                                       : p == Panel::Friends    ? "join-friend"
                                                                 : "confirm-kick");
 }
 
@@ -400,12 +457,25 @@ void Run(Action a) {
     switch (a) {
     case Action::Host: Close(); Coop::Host(); break;
     case Action::Invite: Close(); Coop::InviteFriends(); break;
-    case Action::JoinFriend: Close(); Coop::OpenSteamFriends(); break;
+    case Action::JoinFriend: {
+        const Panel from = u.panel;
+        Open(Panel::Friends);
+        u.returnTo = from;  // BACK goes back to the CO-OP panel it was opened from
+        break;
+    }
+    case Action::PickFriend: {
+        const uint64_t id = u.items[static_cast<size_t>(u.selected)].friendId;
+        if (Coop::JoinFriend(id)) Close();  // else a notice says why; the list stays open
+        break;
+    }
+    case Action::RefreshFriends: Coop::RefreshFriends(); break;
+    case Action::SteamOverlay: Close(); Coop::OpenSteamFriends(); break;
     case Action::JoinIp: Open(Panel::JoinIp); break;
     case Action::Leave: Close(); Coop::Leave(); break;
     case Action::Back: {
-        const Panel back = u.panel == Panel::Name ? Panel::Settings : u.panel == Panel::Settings ? u.returnTo
-                                                                                                 : Panel::None;
+        const Panel back = u.panel == Panel::Name                                    ? Panel::Settings
+                           : u.panel == Panel::Settings || u.panel == Panel::Friends ? u.returnTo
+                                                                                     : Panel::None;
         const Panel outer = u.returnTo;
         Close();
         if (back != Panel::None) {
@@ -621,36 +691,27 @@ void HandleInput(float dt) {
     }
     if (u.panel == Panel::None) return;
 
-    // Gamepad: d-pad / left stick (ui_input reports the stick as d-pad bits) with repeat, A = select, B = back.
-    const uint16_t pad = ui_input::PadButtons();
-    const uint16_t pressed = static_cast<uint16_t>(pad & ~u.padPrev);
-    u.padPrev = pad;
-    if (pressed & XINPUT_GAMEPAD_A) {
+    // Gamepad (dll/pad_nav.h): every connected pad, d-pad or left stick with repeat, A = select, B / START / BACK =
+    // back. Only presses act: what was held when the panel opened waits for its release.
+    const uint32_t nav = u.pad.Update(ui_input::ReadPads(), dt);
+    if (u.items.empty()) return;
+    u.selected = std::clamp(u.selected, 0, static_cast<int>(u.items.size()) - 1);
+    if (nav & PadNav::kAccept) {
+        MC_LOG_DEBUG("ui: pad A on '%s'", u.items[static_cast<size_t>(u.selected)].label.c_str());
         Run(TextPanel(u.panel) && u.items[static_cast<size_t>(u.selected)].action != Action::Back
                 ? SubmitAction()
                 : u.items[static_cast<size_t>(u.selected)].action);
         return;
     }
-    if (pressed & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START)) {
+    if (nav & PadNav::kBack) {
+        MC_LOG_DEBUG("ui: pad back");
         Run(Action::Back);
         return;
     }
-    if (pressed & XINPUT_GAMEPAD_DPAD_LEFT) StepOption(-1);
-    if (pressed & XINPUT_GAMEPAD_DPAD_RIGHT) StepOption(+1);
-    const bool up = (pad & XINPUT_GAMEPAD_DPAD_UP) != 0, down = (pad & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
-    if (pressed & XINPUT_GAMEPAD_DPAD_UP) {
-        Move(-1);
-        u.padRepeat = 0.4f;
-    } else if (pressed & XINPUT_GAMEPAD_DPAD_DOWN) {
-        Move(1);
-        u.padRepeat = 0.4f;
-    } else if (up || down) {
-        u.padRepeat -= dt;
-        if (u.padRepeat <= 0) {
-            Move(up ? -1 : 1);
-            u.padRepeat = 0.15f;
-        }
-    }
+    if (nav & PadNav::kLeft) StepOption(-1);
+    if (nav & PadNav::kRight) StepOption(+1);
+    if (nav & PadNav::kUp) Move(-1);
+    if (nav & PadNav::kDown) Move(1);
 }
 
 // ---- drawing -------------------------------------------------------------------------------------------------------
@@ -841,6 +902,111 @@ void DrawPausePanel(render::DrawList& d, float W, float H, float s) {
                           Stepper(u.items[static_cast<size_t>(u.selected)]);
     if (onOption) hx += Hint(d, hx, y, "Left/Right", "Change", 22 * s);
     hx += Hint(d, hx, y, "Enter", onOption ? "Next" : "Select", 22 * s);
+    Hint(d, hx, y, "Esc", "Back", 22 * s);
+}
+
+// JOIN FRIEND: friends playing this game (name, and what they do: hosting / not hosting / other version / full),
+// then REFRESH, STEAM FRIENDS LIST, BACK. At most kFriendRows friends at a time; the list scrolls with the selection.
+constexpr int kFriendRows = 7;
+void DrawFriends(render::DrawList& d, float W, float H, float s) {
+    UiState& u = U();
+    BuildFriendItems();
+    const Coop::FriendList& fl = u.friends;
+    d.Rect(0, 0, W, H, kShade);
+    const float w = 760 * s, x = (W - w) * 0.5f, pad = 36 * s, rowH = 62 * s;
+    const int nRows = static_cast<int>(fl.rows.size());
+    const int shown = std::min(nRows, kFriendRows);
+    // the message under the title
+    std::string msg, hint;
+    const std::string game = Upper(GetGameInfo().gameName);
+    if (!fl.steamReady) {
+        msg = "STEAM IS NOT AVAILABLE";
+        hint = "Start the game from Steam, or use JOIN BY IP.";
+    } else if (!fl.available) {
+        msg = "CANNOT READ YOUR STEAM FRIENDS LIST";
+        hint = "Open the Steam friends list and choose Join Game on a friend who is hosting.";
+    } else if (nRows == 0) {
+        msg = !fl.scanned          ? "LOOKING FOR FRIENDS..."
+              : fl.friends == 0    ? "NO STEAM FRIENDS FOUND"
+              : fl.online == 0     ? "NONE OF YOUR " + std::to_string(fl.friends) + " FRIENDS ARE ONLINE"
+                                   : "NO FRIEND IS PLAYING " + game + " (" + std::to_string(fl.online) + " ONLINE)";
+        hint = "Your friend chooses CO-OP > HOST CO-OP GAME, then shows up here. They can also invite you.";
+    } else {
+        msg = std::to_string(nRows) + (nRows == 1 ? " FRIEND" : " FRIENDS") + " PLAYING " + game;
+    }
+    const auto hintLines = Wrap(hint, 22 * s, w - pad * 2);
+    const auto menuItems = static_cast<float>(u.items.size()) - static_cast<float>(nRows);
+    const float h = 70 * s + 40 * s + static_cast<float>(hintLines.size()) * 28 * s +
+                    (shown > 0 ? static_cast<float>(shown) * rowH + 30 * s + (nRows > shown ? 26 * s : 0) : 0) +
+                    menuItems * 46 * s + 90 * s;
+    const float top = std::max(20 * s, (H - h) * 0.4f);
+    d.RectH(x, top, w, h, kPanelBg, 0xD8121110);
+    d.Rect(x, top, w, 2 * s, kGoldDim);
+    float y = top + 22 * s;
+    d.Text(x + pad, y, "JOIN FRIEND", 50 * s, kGold);
+    y += 62 * s;
+    d.Text(x + pad, y, msg, 22 * s, kTextDim);
+    y += 40 * s;
+    for (const auto& l : hintLines) {
+        d.Text(x + pad, y - 6 * s, l, 22 * s, kText);
+        y += 28 * s;
+    }
+    // keep the selected friend in view
+    if (u.selected < nRows) {
+        if (u.selected < u.friendScroll) u.friendScroll = u.selected;
+        if (u.selected >= u.friendScroll + kFriendRows) u.friendScroll = u.selected - kFriendRows + 1;
+    }
+    u.friendScroll = std::clamp(u.friendScroll, 0, std::max(0, nRows - kFriendRows));
+    for (int i = 0; i < nRows; ++i) {  // rows scrolled away get no hit box
+        Item& it = u.items[static_cast<size_t>(i)];
+        it.x0 = it.x1 = it.y0 = it.y1 = -1;
+    }
+    if (shown > 0) {
+        d.Rect(x + pad, y - 8 * s, w - pad * 2, 1 * s, 0x60D1AC62);
+        for (int i = u.friendScroll; i < u.friendScroll + shown; ++i) {
+            Item& it = u.items[static_cast<size_t>(i)];
+            const bool sel = i == u.selected;
+            it.x0 = x + pad - 16 * s;
+            it.x1 = x + w - pad;
+            it.y0 = y - 4 * s;
+            it.y1 = y + rowH - 4 * s;
+            if (sel) {
+                d.RectH(it.x0, it.y0, it.x1 - it.x0, it.y1 - it.y0, 0x66B08A45, 0x00B08A45);
+                d.Rect(it.x0, it.y0, 2 * s, it.y1 - it.y0, kGold);
+            }
+            d.Text(x + pad + 4 * s, y, Upper(it.label), 27 * s, sel ? 0xFFFFFFFF : it.joinable ? kText : kTextDim);
+            const uint32_t col = it.warn ? kRed : it.joinable ? 0xFF8CCB7E : kTextDim;
+            d.Text(x + pad + 4 * s, y + 30 * s, it.value, 20 * s, col);
+            y += rowH;
+        }
+        if (nRows > shown) {
+            const std::string more = std::to_string(u.friendScroll + 1) + "-" +
+                                     std::to_string(u.friendScroll + shown) + " OF " + std::to_string(nRows);
+            d.Text(x + w - pad - render::DrawList::TextWidth(more, 19 * s), y, more, 19 * s, kGoldDim);
+            y += 26 * s;
+        }
+        d.Rect(x + pad, y + 4 * s, w - pad * 2, 1 * s, 0x60D1AC62);
+        y += 30 * s;
+    }
+    // the fixed entries (REFRESH, STEAM FRIENDS LIST, BACK) like any panel's items
+    const float ix = x + pad - 16 * s, iw = w - pad * 2 + 16 * s, ipx = 30 * s, irowH = 46 * s;
+    for (size_t i = static_cast<size_t>(nRows); i < u.items.size(); ++i) {
+        Item& it = u.items[i];
+        const bool sel = static_cast<int>(i) == u.selected;
+        it.x0 = ix;
+        it.x1 = ix + iw;
+        it.y0 = y;
+        it.y1 = y + irowH;
+        if (sel) {
+            d.RectH(ix, y + 3 * s, iw, irowH - 6 * s, 0x66B08A45, 0x00B08A45);
+            d.Rect(ix, y + 3 * s, 2 * s, irowH - 6 * s, kGold);
+        }
+        d.Text(ix + 16 * s, y + (irowH - ipx) * 0.5f, it.label, ipx, sel ? 0xFFFFFFFF : kTextDim);
+        y += irowH;
+    }
+    y += 30 * s;
+    float hx = x + pad;
+    hx += Hint(d, hx, y, "Enter", u.selected < nRows ? "Join" : "Select", 22 * s);
     Hint(d, hx, y, "Esc", "Back", 22 * s);
 }
 
@@ -1054,13 +1220,15 @@ bool CoopUi::OpenForTest(const std::string& which) {
     else if (which == "lobby") Open(Panel::Lobby);
     else if (which == "settings") Open(Panel::Settings);
     else if (which == "joinip") Open(Panel::JoinIp);
+    else if (which == "friends") Open(Panel::Friends);
     else return false;
     return true;
 }
 
 std::string CoopUi::Describe() {
     static const char* const kNames[] = {"none",        "pause CO-OP", "join by IP", "password", "player menu",
-                                         "confirm kick", "lobby",       "settings",   "name"};
+                                         "confirm kick", "lobby",       "settings",   "name",
+                                         "join friend"};
     const UiState& u = U();
     const auto pi = static_cast<size_t>(u.panel);
     std::string out = std::string("panel ") + (pi < std::size(kNames) ? kNames[pi] : "?") + ", selected " +
@@ -1110,7 +1278,10 @@ void CoopUi::Tick(float dt) {
         switch (cmd) {
         case MenuCommand::Host: Coop::Host(); break;
         case MenuCommand::Leave: Coop::Leave(); break;
-        case MenuCommand::JoinFriend: Coop::OpenSteamFriends(); break;
+        case MenuCommand::JoinFriend:
+            Open(Panel::Friends);
+            u.returnTo = Panel::None;  // BACK closes it (the main menu CO-OP page is underneath)
+            break;
         case MenuCommand::JoinByIp: Open(Panel::JoinIp); break;
         case MenuCommand::Invite: Coop::InviteFriends(); break;
         case MenuCommand::PausePanel: Open(Panel::PauseCoop); break;
@@ -1146,6 +1317,7 @@ void CoopUi::Tick(float dt) {
     if (u.panel == Panel::Password) DrawPassword(u.list, W, H, s, dt);
     if (u.panel == Panel::PlayerMenu) DrawPlayerMenu(u.list, W, H, s);
     if (u.panel == Panel::ConfirmKick) DrawConfirmKick(u.list, W, H, s);
+    if (u.panel == Panel::Friends) DrawFriends(u.list, W, H, s);
     DrawToasts(u.list, W, s);
 }
 

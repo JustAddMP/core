@@ -105,6 +105,16 @@ bool Load(HINSTANCE__* module) {
     ok &= Resolve(m, a.Friends_ActivateGameOverlay, "SteamAPI_ISteamFriends_ActivateGameOverlay");
     ok &= Resolve(m, a.Friends_SetRichPresence, "SteamAPI_ISteamFriends_SetRichPresence");
     ok &= Resolve(m, a.Friends_ClearRichPresence, "SteamAPI_ISteamFriends_ClearRichPresence");
+    // friends list (JOIN FRIEND): optional, the list is simply empty without them
+    Resolve(m, a.Friends_GetFriendCount, "SteamAPI_ISteamFriends_GetFriendCount", false);
+    Resolve(m, a.Friends_GetFriendByIndex, "SteamAPI_ISteamFriends_GetFriendByIndex", false);
+    Resolve(m, a.Friends_GetFriendPersonaState, "SteamAPI_ISteamFriends_GetFriendPersonaState", false);
+    Resolve(m, a.Friends_GetFriendGamePlayed, "SteamAPI_ISteamFriends_GetFriendGamePlayed", false);
+    Resolve(m, a.Friends_GetFriendRichPresence, "SteamAPI_ISteamFriends_GetFriendRichPresence", false);
+    Resolve(m, a.Friends_RequestFriendRichPresence, "SteamAPI_ISteamFriends_RequestFriendRichPresence", false);
+    Resolve(m, a.MM_RequestLobbyData, "SteamAPI_ISteamMatchmaking_RequestLobbyData", false);
+    if (!a.Friends_GetFriendCount || !a.Friends_GetFriendByIndex || !a.Friends_GetFriendGamePlayed)
+        Log(kWarn, "steam: friends-list exports missing: JOIN FRIEND can only open the Steam overlay");
     ok &= Resolve(m, a.MM_CreateLobby, "SteamAPI_ISteamMatchmaking_CreateLobby");
     ok &= Resolve(m, a.MM_JoinLobby, "SteamAPI_ISteamMatchmaking_JoinLobby");
     ok &= Resolve(m, a.MM_LeaveLobby, "SteamAPI_ISteamMatchmaking_LeaveLobby");
@@ -198,6 +208,12 @@ void UnregisterAll() {
     g_queue.clear();
     ReleaseSRWLockExclusive(&g_lock);
     g_ready = false;
+}
+
+void SetApiForTest(const Api& api) {
+    g_api = api;
+    g_loaded = true;
+    g_ready = true;
 }
 
 }  // namespace mc::net::steam

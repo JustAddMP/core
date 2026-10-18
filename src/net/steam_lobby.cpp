@@ -8,12 +8,16 @@
 
 #include "net/net_internal.h"
 #include "net/steam_flat.h"
+#include "net/steam_friends.h"
 
 namespace mc::net {
 using namespace detail;
 
 namespace {
 constexpr double kCallTimeoutS = 20.0;
+// Rich presence is set again this often while in a lobby: the game runs its own (older) steam_api instance for the
+// same app and user, and anything it clears there must not leave friends without "Join Game" / JOIN FRIEND.
+constexpr double kPresenceRefreshS = 30.0;
 constexpr uint32_t kChatMemberEntered = 0x0001;  // EChatMemberStateChange
 steam::Api& api() { return steam::Get(); }
 }  // namespace
@@ -173,6 +177,7 @@ std::string SteamLobby::PersonaName(uint64_t steamId) const {
 
 void SteamLobby::SetPresence(bool on) {
     if (!steam::Ready()) return;
+    presenceAt_ = Now();
     if (on) {
         std::string connect = "+connect_lobby " + std::to_string(lobby_);
         api().Friends_SetRichPresence(api().friends, "connect", connect.c_str());
@@ -208,9 +213,10 @@ void SteamLobby::OnEntered(bool ok, uint64_t lobby, uint32_t response) {
     if (!ok || response != steam::k_EChatRoomEnterResponseSuccess) {
         state_ = State::Idle;
         lobby_ = 0;
-        std::string why = "could not join lobby (EChatRoomEnterResponse " + std::to_string(response) + ")";
-        Log(kWarn, "steam: %s", why.c_str());
-        if (onFailed) onFailed(why);
+        lastEnterResponse_ = ok ? response : steam::k_EChatRoomEnterResponseError;
+        Log(kWarn, "steam: could not join lobby %llu (ok=%d, EChatRoomEnterResponse %u)",
+            static_cast<unsigned long long>(lobby), ok, response);
+        if (onFailed) onFailed(LobbyEnterResponseText(lastEnterResponse_));
         return;
     }
     lobby_ = lobby;
@@ -221,6 +227,7 @@ void SteamLobby::OnEntered(bool ok, uint64_t lobby, uint32_t response) {
     std::string ver = GetData("mc_version");
     if (!ver.empty() && ver != modVersion_)
         Log(kWarn, "steam: lobby mod version '%s' differs from ours '%s'", ver.c_str(), modVersion_.c_str());
+    lastEnterResponse_ = response;
     SetPresence(true);
     Log(kInfo, "steam: joined lobby %llu, host %llu", static_cast<unsigned long long>(lobby_),
         static_cast<unsigned long long>(host_));
@@ -230,6 +237,7 @@ void SteamLobby::OnEntered(bool ok, uint64_t lobby, uint32_t response) {
 void SteamLobby::Poll() {
     if (!inited_) return;
     steam::Pump();
+    if (state_ == State::InLobby && Now() - presenceAt_ > kPresenceRefreshS) SetPresence(true);
     if (!call_) return;
     auto useFallback = [&](const char* why) {
         Log(kWarn, "steam: lobby call result %s, using the LobbyEnter_t broadcast", why);

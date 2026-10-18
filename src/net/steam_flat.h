@@ -28,6 +28,19 @@ enum EP2PSend : int {
 };
 constexpr int k_EResultOK = 1;
 constexpr uint32_t k_EChatRoomEnterResponseSuccess = 1;
+// EChatRoomEnterResponse (why JoinLobby failed), see LobbyEnterResponseText in steam_friends.h
+constexpr uint32_t k_EChatRoomEnterResponseDoesntExist = 2;
+constexpr uint32_t k_EChatRoomEnterResponseNotAllowed = 3;
+constexpr uint32_t k_EChatRoomEnterResponseFull = 4;
+constexpr uint32_t k_EChatRoomEnterResponseError = 5;
+constexpr uint32_t k_EChatRoomEnterResponseBanned = 6;
+constexpr uint32_t k_EChatRoomEnterResponseLimited = 7;
+constexpr uint32_t k_EChatRoomEnterResponseMemberBlockedYou = 10;
+constexpr uint32_t k_EChatRoomEnterResponseYouBlockedMember = 11;
+constexpr uint32_t k_EChatRoomEnterResponseRatelimitExceeded = 15;
+// EFriendFlags / EPersonaState
+constexpr int k_EFriendFlagImmediate = 0x04;  // regular friends
+constexpr int k_EPersonaStateOffline = 0;
 
 // ---- callback ids (k_iSteamXCallbacks base + offset) ----
 constexpr int kCb_GameLobbyJoinRequested = 333;        // k_iSteamFriendsCallbacks + 33
@@ -95,6 +108,15 @@ struct P2PSessionState_t {
     uint16_t m_nRemotePort;
 };
 static_assert(sizeof(P2PSessionState_t) == 20);
+// GetFriendGamePlayed. CGameID and CSteamID are pack(1) unions of a uint64, the rest is pack 8.
+struct FriendGameInfo_t {
+    uint64_t m_gameID;        // CGameID: app id in the low 24 bits, type (0 = app) in bits 24..31, mod id above
+    uint32_t m_unGameIP;
+    uint16_t m_usGamePort;
+    uint16_t m_usQueryPort;
+    uint64_t m_steamIDLobby;  // the lobby the friend is in, when it is visible to us (0 / invalid otherwise)
+};
+static_assert(sizeof(FriendGameInfo_t) == 24);
 #pragma pack(pop)
 
 // ---- the resolved API ----
@@ -127,6 +149,13 @@ struct Api {
     void (*Friends_ActivateGameOverlay)(void* self, const char* dialog) = nullptr;  // "Friends", "Players", ...
     bool (*Friends_SetRichPresence)(void* self, const char* key, const char* value) = nullptr;
     void (*Friends_ClearRichPresence)(void* self) = nullptr;
+    // friends list (JOIN FRIEND, net/steam_friends.h)
+    int (*Friends_GetFriendCount)(void* self, int flags) = nullptr;
+    uint64_t (*Friends_GetFriendByIndex)(void* self, int index, int flags) = nullptr;
+    int (*Friends_GetFriendPersonaState)(void* self, uint64_t id) = nullptr;
+    bool (*Friends_GetFriendGamePlayed)(void* self, uint64_t id, FriendGameInfo_t* out) = nullptr;
+    const char* (*Friends_GetFriendRichPresence)(void* self, uint64_t id, const char* key) = nullptr;
+    void (*Friends_RequestFriendRichPresence)(void* self, uint64_t id) = nullptr;
     // ISteamMatchmaking
     SteamAPICall_t (*MM_CreateLobby)(void* self, int type, int maxMembers) = nullptr;
     SteamAPICall_t (*MM_JoinLobby)(void* self, uint64_t lobby) = nullptr;
@@ -137,6 +166,7 @@ struct Api {
     int (*MM_GetNumLobbyMembers)(void* self, uint64_t lobby) = nullptr;
     uint64_t (*MM_GetLobbyMemberByIndex)(void* self, uint64_t lobby, int index) = nullptr;
     bool (*MM_SetLobbyJoinable)(void* self, uint64_t lobby, bool joinable) = nullptr;
+    bool (*MM_RequestLobbyData)(void* self, uint64_t lobby) = nullptr;  // data of a lobby we are not in
     // ISteamUtils
     bool (*Utils_IsAPICallCompleted)(void* self, SteamAPICall_t call, bool* failed) = nullptr;
     bool (*Utils_GetAPICallResult)(void* self, SteamAPICall_t call, void* out, int size, int expectedId,
@@ -179,5 +209,9 @@ void Pump();
 // Unregister all callback objects. Only for standalone tools before SteamAPI_Shutdown; the dll never calls it
 // (the game's RunCallbacks may be iterating on another thread).
 void UnregisterAll();
+
+// Tests only: use `api` (fake function pointers, fake interface pointers) as the loaded and ready API, without a
+// steam_api64.dll. Broadcast callbacks are not available then (Subscribe needs RegisterCallback).
+void SetApiForTest(const Api& api);
 
 }  // namespace mc::net::steam
