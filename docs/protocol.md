@@ -22,7 +22,7 @@ every reason but a remote close as a lost connection (see "Reconnect").
 
 | Value | Where | Rule |
 |---|---|---|
-| `kProtocolVersion` (session.h, currently 7; 5 added the session password, 6 Kicked and the ban Reject, 7 the lobby) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
+| `kProtocolVersion` (session.h, currently 8; 5 added the session password, 6 Kicked and the ban Reject, 7 the lobby, 8 reconnect: Hello / Welcome trailers and PeerDropped) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
 | `modBuild` (SessionConfig, derived by the dll from `GameInfo::modVersion`, "1.2.3" -> 10203) | Hello | Must match exactly (sync code must be identical on both sides). |
 | UDP wire version (byte 2 of every datagram, currently 1) | UDP header | Datagrams with another version are ignored. Bump only if the UDP framing changes. |
 | Lobby data `mc_version` / `mc_proto` | Steam lobby | Informational (shown before connecting); the Hello check is authoritative. |
@@ -264,7 +264,7 @@ host                                         lost guest                         
 - While reconnecting `IsActive()` is false: sends fail, `GameModule::SessionTick` keeps running, the dll shows the
   state in its CO-OP panels ("CONNECTION LOST - RECONNECTING... 12 S"); LEAVE CO-OP ends the retries.
 - Compatibility: both trailers are optional and older code ignores trailing bytes and unknown session types, but
-  `kProtocolVersion` should still be bumped with this change (sessions are version-checked anyway).
+  `kProtocolVersion` is 8 since this change (sessions are version-checked anyway).
 - Tests: `tests/net_reconnect.cpp`.
 
 ## UDP transport

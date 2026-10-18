@@ -17,7 +17,7 @@
 namespace mc::net {
 
 // Bump when the session or any app message format changes incompatibly.
-constexpr uint32_t kProtocolVersion = 7;  // 5: session password; 6: Kicked, ban Reject; 7: lobby (net/lobby.h)
+constexpr uint32_t kProtocolVersion = 8;  // 5: session password; 6: Kicked, ban Reject; 7: lobby (net/lobby.h); 8: reconnect
 
 using PlayerId = uint8_t;
 constexpr PlayerId kHostPlayer = 0;

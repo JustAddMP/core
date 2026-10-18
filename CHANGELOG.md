@@ -3,6 +3,48 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.11.0 (unreleased)
+
+A JOIN FRIEND panel, a working physical gamepad on the co-op panels with button prompts like the games' menus, and
+automatic reconnect after a lost connection. New features, so a minor release. Game repos keep building without
+changes (the new `GameModule` reconnect hooks have defaults). The wire protocol version goes to 8 (reconnect
+trailers and PeerDropped), so players need the same build. Not yet tested in a real game.
+
+- JOIN FRIEND panel (`net/steam_friends.h`): the Steam friends who play the game, with what they are doing:
+  hosting, in a friend's game, checking, not hosting, other version, full. Found through the friend's lobby
+  (`GetFriendGamePlayed`), else his rich presence `connect`; the lobby data `mc_version` / `mc_proto` / `mc_host` /
+  `mc_state` / `mc_mode` / `mc_players` / `mc_max` says the rest. `Coop::GetFriends` / `RefreshFriends` /
+  `JoinFriend`; `MenuCommand::JoinFriend` opens this panel instead of the Steam overlay.
+  - The version is checked when entering a lobby (invites too), before connecting; Steam lobby join errors
+    (`EChatRoomEnterResponse`) are shown in words; rich presence is refreshed every 30 s.
+  - `steam_flat`: the friends exports used above, `SetApiForTest`.
+- Physical gamepad on the panels:
+  - Every XInput user slot is read (not only the first), empty slots are probed once a second, connect / disconnect
+    is logged; an unplugged pad no longer blocks the game's input.
+  - `PadNav` (`src/dll/pad_nav.h`): presses only, stick hysteresis with the dominant axis (left / right too),
+    repeat, a button held when the panel opens is ignored, B / START / BACK = back; it also reports X / Y / LB / RB.
+  - The packet number is bumped when the block changes; DirectInput joysticks are blocked with frozen axes.
+- Button prompts (`src/dll/ui_prompts.h`): the panel footers follow the input device like the games' menus: gamepad
+  glyphs (A / B / X / Y, LB / RB, d-pad) after pad input, key names after keys / mouse (`DeviceTracker`, fed from
+  every XInput read and the window messages; switches are logged). One prompt list per panel drives both the footer
+  and the pad's X / Y / LB / RB: lobby X Start / Ready / Join game, Y Invite; CO-OP panel Y Invite; JOIN FRIEND
+  Y / F5 Refresh; text boxes X / Backspace Delete, Y / Ctrl+V Paste. Footers shrink to fit the panel; X / Y / LB / RB
+  held after a panel closes keep the game blocked like A / B. The test dump and the panel-open log show the footer.
+- Reconnect after a lost connection (docs/protocol.md "Reconnect"):
+  - Host: a guest whose connection timed out or failed (not a clean leave, kick or ban) keeps his slot for
+    `reconnectHoldS` (60 s); the others get `PeerDropped` (0x0D) and see him in `Session::DroppedPlayers()`.
+  - Guest: the session stays (`SessionState::Reconnecting`, `IsReconnecting`, `ReconnectLeftS`) and rejoins the same
+    address with backoff for `reconnectWindowS` (60 s); the resume token from the Welcome gets the same slot and id
+    back (and skips the password; bans still apply). LEAVE CO-OP ends the retries.
+  - Hello / Welcome carry optional trailers (resume token, resumed flag). `PlayerInfo::joinSeq` counts entries into
+    `Players()` so games that diff it see a returning player as new (`net::Lobby` does).
+  - `GameModule::OnPlayerDropped` (default: as if he left), `OnConnectionLost`, `OnReconnected(sameSlot)`;
+    session callbacks `onPlayerDropped` / `onPlayerResumed` / `onConnectionLost` / `onReconnected`.
+  - The CO-OP panels and banners show the state ("CONNECTION LOST - RECONNECTING... 12 S"); over Steam the guest
+    re-enters the host's lobby every 10 s if he is no longer in it (UNVERIFIED whether a P2P drop leaves the lobby).
+- `kProtocolVersion` 8.
+- Tests: `steam_friends` (against a fake Steam), `pad_nav`, `ui_prompts`, `net_reconnect`.
+
 ## v0.10.0 — 2026-10-17
 
 Sync traces for comparing two games after a test, and remote motion fixes from the first real two-PC test (Mafia DE

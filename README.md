@@ -65,6 +65,7 @@ out\crash_dump.exe           crash handler: one minidump for the real crash, non
 out\launcher_args.exe        launcher argument parsing: keys that need a value refuse to start without one
 out\config_set.exe           Config::Set saves a value into the ini (only that line changes; wins over env overrides);
                              GetFileString ignores launch overrides
+out\test_input.exe           test input script parser (virtual pad presses, mouse, keys for the co-op panels)
 out\proxy_test.exe           version.dll proxy + launcher --install/--uninstall against a fake game folder
 out\steam_smoke.exe <copy of steam_api64.dll>    manual: needs Steam running (app 480, Spacewar)
 ```
