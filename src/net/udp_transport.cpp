@@ -379,6 +379,7 @@ struct UdpTransport::Impl {
             p->stats.bytesSent += bytes.size();
             p->stats.packetsSent++;
         }
+        if (opt.testDrop && opt.testDrop(std::span<const uint8_t>(bytes.data(), bytes.size()))) return;
         if (!SimActive()) {
             RawSend(to, bytes.data(), bytes.size());
             return;

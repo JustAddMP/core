@@ -13,7 +13,7 @@ Session  (session.cpp)   handshake, player list, ping, chat, app messages, host 
 SteamLobby (steam_lobby.cpp)  lobby, invites, rich presence -> gives the guest the host's SteamID
 ```
 
-Transport guarantees: `Reliable` messages arrive once, in order, per peer, up to 256 KB. `Unreliable` messages may
+Transport guarantees: `Reliable` messages arrive once, in order per peer and lane (see "Lanes"), up to 256 KB. `Unreliable` messages may
 be lost or reordered, up to 1100 bytes. A peer that is silent for 10 s is dropped (`Timeout`). Local `Disconnect()`
 raises no event; remote close, timeout, refused and failed connects raise `Disconnected(reason)`. The session treats
 every reason but a remote close as a lost connection (see "Reconnect").
@@ -22,7 +22,7 @@ every reason but a remote close as a lost connection (see "Reconnect").
 
 | Value | Where | Rule |
 |---|---|---|
-| `kProtocolVersion` (session.h, currently 8; 5 added the session password, 6 Kicked and the ban Reject, 7 the lobby, 8 reconnect: Hello / Welcome trailers and PeerDropped) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
+| `kProtocolVersion` (session.h, currently 9; 5 added the session password, 6 Kicked and the ban Reject, 7 the lobby, 8 reconnect: Hello / Welcome trailers and PeerDropped, 9 reliable lanes (UDP lane units) and the session clock (Pong trailer)) | Hello | Must match exactly. Bump on ANY incompatible change to session or app messages. |
 | `modBuild` (SessionConfig, derived by the dll from `GameInfo::modVersion`, "1.2.3" -> 10203) | Hello | Must match exactly (sync code must be identical on both sides). |
 | UDP wire version (byte 2 of every datagram, currently 1) | UDP header | Datagrams with another version are ignored. Bump only if the UDP framing changes. |
 | Lobby data `mc_version` / `mc_proto` | Steam lobby | Informational (shown before connecting); the Hello check is authoritative. |
@@ -42,7 +42,7 @@ Every transport message starts with a one-byte session message type.
 | 0x04 | PeerJoined | H->G | R | u8 id, str name |
 | 0x05 | PeerLeft | H->G | R | u8 id, str reason ("closed by remote", "timed out", ...) |
 | 0x06 | Ping | both | U | u32 sender time ms |
-| 0x07 | Pong | both | U | u32 echoed time ms |
+| 0x07 | Pong | both | U | u32 echoed time ms; trailer (protocol 9): u64 the answering side's clock in microseconds (see "Session clock") |
 | 0x08 | Chat | both | R | u8 from (host overwrites with the real sender), str text (<= 256) |
 | 0x09 | PingTable | H->G | U | u8 count, count x {u8 id, u16 rtt ms} (every 2 s, for a ping display) |
 | 0x0A | Challenge | H->G | R | 32 random bytes (only when the host has a password; see "Session password") |
@@ -267,6 +267,63 @@ host                                         lost guest                         
   `kProtocolVersion` is 8 since this change (sessions are version-checked anyway).
 - Tests: `tests/net_reconnect.cpp`.
 
+## Latency
+
+Where a message spends time between one game's `Send` and the other game's handler, and what core does about it
+(core 0.12; measured by `tests/net_latency.cpp` on loopback):
+
+| Stage | Before | Now |
+|---|---|---|
+| Sent during the frame, queued until the next `Poll` flushes it | up to 1 frame (16.7 ms at 60 fps; measured p50 16.7 ms) | `Session::Flush()` at the end of the frame: core's `Coop::Tick` calls it right after `GameModule::SessionTick`, the session flushes its own pings at once (measured p50 0.06 ms) |
+| Network (one way) | - | - (Steam: unreliable data `k_EP2PSendUnreliableNoDelay`, below) |
+| Waiting in the socket for the receiver's `Poll` | 0..1 frame | the same: handlers run on the game thread once per frame |
+| A lost reliable unit | RTO `srtt + 4 rttvar + 10 ms`, at least 50 ms | fast retransmit as soon as a later unit is acknowledged (one round trip + 2..20 ms); RTO floor 30 ms. Measured at 10 % loss, 20 ms each way, 60 msgs/s: p50 21.8 ms, p95 81 ms |
+| Head-of-line: everything reliable waits for one lost or big message | always | only the messages of the same lane (and lane 0) wait; see "Lanes" |
+| Guest -> guest | two hops via the host | the same; the host relays in the Poll that received it and flushes at its end |
+
+Games also need to know how old a state is and how far in the past to show it: "Session clock" (one clock for
+every game) and `net/playout.h` (adaptive playout delay instead of a fixed one).
+
+### Lanes
+
+`Session::SetLane(firstMsg, lastMsg, lane)` puts the reliable app messages of an id range on a lane (1..7;
+`kLanes` = 8, lane 0 is the default). The transport keeps one ordered stream per lane: a message is delivered as
+soon as its lane is complete up to it and every lane-0 message sent before it was delivered. Lane 0 is a barrier in
+both directions (a lane-0 message waits for everything sent before it on any lane; a lane message waits for the
+lane-0 messages sent before it), so session control (Welcome, PeerJoined/Left, ...) stays ordered with all app
+traffic. Only messages that do not need to be ordered with other systems' messages belong on a lane; the table is
+not sent, host and guests must set the same one (same build). Relayed messages keep their lane (the host looks it up
+by id). Unreliable messages ignore lanes.
+
+UDP: a reliable unit on lane k > 0 has bit 0x80 in its kind byte and `u8 lane, u16 laneSeq, u16 barrier` after its
+seq (`laneSeq`: its place in the lane; `barrier`: lane-0 units queued before it). Lane-0 units are unchanged (old
+format, delivered in global order), so a build that never uses lanes sends exactly what protocol 8 sent. Steam:
+lane k's reliable data goes on P2P channel 7 + k; all channels are read every Poll (UNVERIFIED whether Steam orders
+reliable packets per channel; if it does not, lanes simply give no gain there).
+
+### Session clock
+
+Every game can read the host's clock: `Session::SessionTime()` (seconds; `SessionTimeMs()` for a u32 wire stamp).
+The host's Pong carries its clock (`u64 us`); the guest computes `offset = hostClock - (sent + received) / 2` per ping
+and uses the offset of the sample with the shortest round trip among the last 16 (at most 30 s old), smoothed
+(a change over 250 ms is taken at once and logged). After a Welcome the guest pings 8 times every 100 ms, so the
+clock is synced within ~0.1-0.2 s of the join (`ClockSynced()`); afterwards once a second. `ClockErrorMs()` is half
+the best round trip (an upper bound; on a symmetric route the error is far smaller: 0.2 ms in the loopback test with
+15 +-3 ms each way). A time stamped with `SessionTime()` by one game, read by another: `SessionTime() - stamp` = how
+long it took (including both games' frame waits). A Pong without the trailer (older peer) gives no sample.
+
+### Playout delay (net/playout.h)
+
+`playout::PlayoutClock` per remote sender: `Observe(senderTime, arrivalTime)` for every snapshot, `Update(now)` once
+per frame, `RenderTime(now)` = the sender-clock time to show. Offset = the minimum of (arrival - stamp) over the
+last 4 s (needs no clock sync, follows drift and route changes); delay = 95th percentile of each snapshot's lateness
+over that minimum (last 128 snapshots) + the snapshot interval + 4 ms, clamped to 8..300 ms (50 ms until 12 snapshots
+arrived). The render clock moves toward the target at most 25 % slower or 3 % faster than real time, so it never
+jumps. Measured (`net_latency`): steady 60 Hz with frame-quantised arrivals 24.5 ms (was a fixed 50 ms); 60 ms jitter
+94 ms with 0 % late snapshots (fixed 50 ms: 33 % late); back to 24.5 ms after a jitter burst; 20 Hz stream 54 ms.
+`playout::Hermite` (cubic between two snapshots with their velocities) and `playout::Extrapolate` (velocity plus a
+briefly applied acceleration, clamped) are the matching interpolation helpers.
+
 ## UDP transport
 
 Datagrams are at most 1200 bytes (MTU). IPv4, address `ip[:port]` (default port `UdpOptions::defaultPort`: the
@@ -319,9 +376,14 @@ u16 seq   (reliable kinds only; 16-bit wrapping)
 varint length, bytes
 ```
 
+With a lane (k > 0, see "Lanes") the kind byte has bit 0x80 and `u8 lane, u16 laneSeq, u16 barrier` follow the seq.
+
 Reliable channel: each unit has a sequence number; window 256 units; the receiver buffers out-of-order units and
-delivers strictly in order. Unacked units are resent after an RTO of `srtt + 4*rttvar` (50 ms .. 1 s, Karn's rule:
-only first transmissions give RTT samples), doubled per retry up to 8x. Up to 128 new units per Poll. Messages
+delivers lane-0 units strictly in order (lane units: see "Lanes"). Unacked units are resent after an RTO of
+`srtt + 4*rttvar + 10 ms` (30 ms .. 1 s, Karn's rule: only first transmissions give RTT samples), doubled per retry up
+to 8x, or earlier by fast retransmit: a unit sent in an earlier datagram than a unit that was acknowledged (first
+transmissions only) and still unacknowledged after that unit's round trip plus `clamp(srtt / 4, 2, 20 ms)` is sent
+again at once (`PeerStats::fastResends`). Up to 128 new units per Poll. Messages
 over 1100 bytes are split into fragments (first fragment starts with `u32 totalLength`, max 256 KB); since
 fragments are reliable and ordered, reassembly is a simple append.
 
@@ -356,14 +418,17 @@ session requests the receiver must accept - and today's Steam client implements 
 network. Everything we need is a flat export: `SendP2PPacket`, `IsP2PPacketAvailable`, `ReadP2PPacket`,
 `AcceptP2PSessionWithUser`, `CloseP2PSessionWithUser`, `AllowP2PPacketRelay`. Receiving is pure polling.
 
-All our traffic uses P2P channel 7. Packet = `u8 0x4D` ('M'), `u8 ctrl`, body:
+All our traffic uses P2P channel 7 (reliable data of lane k > 0: channel 7 + k).
+No send type we use buffers (Nagle is only `k_EP2PSendReliableWithBuffering`); no-delay for unreliable data means a
+state Steam cannot send at once is dropped instead of going out late behind newer ones (UNVERIFIED in a real Steam
+session). Packet = `u8 0x4D` ('M'), `u8 ctrl`, body:
 
 | ctrl | Name | Send type | Body |
 |---|---|---|---|
 | 1 | CONNECT | reliable, re-sent every 1 s | - |
 | 2 | ACCEPT | reliable | - |
 | 3 | DATA | reliable (`k_EP2PSendReliable`, ordered, <= 1 MB) | message |
-| 4 | DATA | unreliable (`k_EP2PSendUnreliable`) | message |
+| 4 | DATA | unreliable: `k_EP2PSendUnreliableNoDelay` once a PONG came back from the peer (PONGs are sent no-delay too, so that proves it works on this connection), `k_EP2PSendUnreliable` before | message |
 | 5/6 | PING/PONG | unreliable no-delay | u32 id |
 | 7 | DISCONNECT | reliable | - |
 | 8 | REFUSE | reliable | - |

@@ -34,6 +34,8 @@ struct UdpOptions {
     uint32_t simSeed = 1;
     // Test-only: sees every datagram as it goes to the socket (after simulation), e.g. to scan for secrets.
     std::function<void(std::span<const uint8_t>)> testOnSend;
+    // Test-only: a datagram for which this returns true is not sent (deterministic loss, before the simulation).
+    std::function<bool(std::span<const uint8_t>)> testDrop;
 };
 
 class UdpTransport final : public Transport {
