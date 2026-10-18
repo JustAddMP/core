@@ -1,7 +1,8 @@
 // net_reconnect: a guest whose connection is lost (not a clean leave, kick or ban) keeps playing and rejoins the same
 // host; the host holds his slot meanwhile (docs/protocol.md "Reconnect"). Host + guests over UdpTransport on 127.0.0.1
 // in one process; a "lost connection" is made with the transport's test simulation (simLoss = 1: every datagram the
-// node sends is dropped, so the other side times out, then this side too).
+// node sends is dropped, so the other side times out, then this side too). Section 10: four players, two guests lost
+// at once, both back into their own slots one after the other, no newcomer meanwhile.
 // Prints PASS/FAIL per check, exits non-zero on any failure. "-v" prints net info logs.
 #include <windows.h>
 
@@ -434,6 +435,57 @@ int main(int argc, char** argv) {
         Check(a->reconnects == 0 && a->session.LastReject() == RejectReason::Banned &&
                   a->session.State() == SessionState::Disconnected,
               "his reconnect is refused (banned)", "\"" + a->disconnectReason + "\"");
+    }
+
+    // ---- 10. four players: two guests lose the connection at once, both come back into their own slots ----
+    {
+        auto host = MakeHost();
+        auto a = MakeGuest("Alice");
+        auto b = MakeGuest("Bob");
+        auto c = MakeGuest("Carol");
+        const bool in = Join(*host, *a) && Join(*host, *b, {a.get()}) && Join(*host, *c, {a.get(), b.get()});
+        Nodes all{host.get(), a.get(), b.get(), c.get()};
+        Pump(all, 2, [&] { return a->session.Players().size() == 4; });
+        Check(in && host->session.Players().size() == 4, "4 players: setup");
+        const PlayerId aid = a->session.LocalId(), bid = b->session.LocalId(), cid = c->session.LocalId();
+        a->Block(true);
+        b->Block(true);
+        Pump(all, 8, [&] {
+            return host->Dropped(aid) && host->Dropped(bid) && c->Dropped(aid) && c->Dropped(bid) &&
+                   a->session.IsReconnecting() && b->session.IsReconnecting();
+        });
+        const auto held = host->session.DroppedPlayers();
+        Check(held.size() == 2 && host->session.Players().size() == 2 && c->session.DroppedPlayers().size() == 2 &&
+                  c->session.Players().size() == 2,
+              "4 players: two held at once, the host and the third guest see both", std::to_string(held.size()));
+        // a newcomer while two slots are held: the one free slot is the only one he may get
+        auto d = MakeGuest("Dave");
+        const bool din = Join(*host, *d, {a.get(), b.get(), c.get()});
+        Check(!din && d->session.LastReject() == RejectReason::Full, "4 players: no newcomer while the slots are held",
+              "\"" + d->disconnectReason + "\"");
+        a->Block(false);
+        Pump(all, 8, [&] { return a->reconnects > 0 && c->Resumed(aid); });
+        Check(a->reconnects == 1 && a->lastSameSlot && a->session.LocalId() == aid && b->session.IsReconnecting() &&
+                  host->session.DroppedPlayers().size() == 1,
+              "4 players: the first is back in his slot, the second still held");
+        b->Block(false);
+        Pump(all, 8, [&] { return b->reconnects > 0 && c->Resumed(bid) && a->Resumed(bid); });
+        Check(b->reconnects == 1 && b->lastSameSlot && b->session.LocalId() == bid &&
+                  host->session.Players().size() == 4 && host->session.DroppedPlayers().empty(),
+              "4 players: the second is back in his slot too");
+        Pump(all, 2, [&] { return a->session.Players().size() == 4 && b->session.Players().size() == 4; });
+        Check(a->session.Players().size() == 4 && b->session.Players().size() == 4 && c->session.Players().size() == 4 &&
+                  Find(a->session, bid) && Find(b->session, aid) && Find(a->session, cid),
+              "4 players: everyone sees everyone again");
+        // guest-to-guest traffic through the host's relay works again for the two who came back
+        const uint8_t one[1] = {1};
+        b->appFrom.clear();
+        c->appFrom.clear();
+        a->session.SendTo(bid, 0x0001, one);
+        a->session.Broadcast(0x0001, one);
+        Pump(all, 2, [&] { return b->appFrom.size() >= 2 && !c->appFrom.empty(); });
+        Check(b->appFrom.size() >= 2 && b->appFrom[0] == aid && !c->appFrom.empty() && c->appFrom[0] == aid,
+              "4 players: guest -> guest and broadcasts flow again after both reconnects");
     }
 
     std::printf("\n%s: %d failure(s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures);

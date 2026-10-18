@@ -3,7 +3,8 @@
 // Checks: ready flags reach the host and every guest; a start waits for everyone to be ready, then reaches every
 // guest once with the host's mode; guests cannot start or fake the state; a late joiner sees the game in progress;
 // a newcomer is not ready; a host that leaves is reported to the guests at once ("host closed the session", not a
-// timeout) and a guest that leaves is reported to the host at once.
+// timeout) and a guest that leaves is reported to the host at once. A full lobby of four (host + 3 guests): a fifth is
+// refused, the start waits for all three, a freed slot goes to a newcomer, the host's leave reaches all three.
 // Prints PASS/FAIL per check, exits non-zero on any failure. "-v" prints net info logs.
 #include <windows.h>
 
@@ -211,6 +212,59 @@ int main(int argc, char** argv) {
         Check(a.disconnectReason == "host closed the session" && dt < 1.0,
               "a host that leaves is reported to the guests at once",
               "\"" + a.disconnectReason + "\" after " + std::to_string(dt) + " s");
+    }
+
+    // ---- a full lobby: host + 3 guests (kMaxPlayers 4): ready, start, a fifth refused ----
+    {
+        Node h4("Host4");
+        Check(h4.session.Host(0), "4 players: host bind");
+        Node g1("Gina"), g2("Hugo"), g3("Ivy");
+        const bool in4 = Join(h4, g1) && Join(h4, g2, {&g1}) && Join(h4, g3, {&g1, &g2});
+        Nodes four{&h4, &g1, &g2, &g3};
+        Pump(four, 3, [&] { return g1.session.Players().size() == 4 && g3.session.Players().size() == 4; });
+        Check(in4 && h4.session.Players().size() == 4 && g1.session.Players().size() == 4 &&
+                  g2.session.Players().size() == 4 && g3.session.Players().size() == 4,
+              "4 players: everyone sees all four");
+        Node g5("Jack");
+        g5.session.Join(Addr(h4));
+        Nodes five{&h4, &g1, &g2, &g3, &g5};
+        Pump(five, 6, [&] { return g5.joined || !g5.disconnectReason.empty(); });
+        Check(!g5.joined && g5.disconnectReason.find("full") != std::string::npos && h4.session.Players().size() == 4,
+              "4 players: a fifth is refused (full)", "\"" + g5.disconnectReason + "\"");
+        g1.lobby.SetReady(true);
+        g2.lobby.SetReady(true);
+        Pump(four, 5, [&] { return h4.lobby.Ready(g1.session.LocalId()) && h4.lobby.Ready(g2.session.LocalId()); });
+        Check(!h4.lobby.AllReady() && !h4.lobby.Start(3), "4 players: two of three ready: start refused");
+        g3.lobby.SetReady(true);
+        auto allSeen = [&] {
+            bool seen = true;
+            for (Node* n : {&g1, &g2, &g3})
+                for (Node* m : {&g1, &g2, &g3}) seen &= n->lobby.Ready(m->session.LocalId());
+            return seen;
+        };
+        Pump(four, 5, [&] { return h4.lobby.AllReady() && allSeen(); });
+        Check(h4.lobby.AllReady() && allSeen(), "4 players: all three ready, every guest sees every flag");
+        const bool st = h4.lobby.Start(3);
+        Pump(four, 5, [&] { return g1.starts.size() == 1 && g2.starts.size() == 1 && g3.starts.size() == 1; });
+        Check(st && h4.starts == std::vector<int>{3} && g1.starts == std::vector<int>{3} &&
+                  g2.starts == std::vector<int>{3} && g3.starts == std::vector<int>{3},
+              "4 players: the start reaches all three guests once");
+        // one guest leaves: the others stay, a newcomer gets his slot and is not ready
+        g2.session.Leave();
+        Pump({&h4, &g1, &g3}, 3, [&] { return h4.session.Players().size() == 3 && g1.session.Players().size() == 3; });
+        Node g6("Kim");
+        const bool in6 = Join(h4, g6, {&g1, &g3});
+        Pump({&h4, &g1, &g3, &g6}, 3, [&] { return g1.session.Players().size() == 4; });
+        Check(in6 && h4.session.Players().size() == 4 && !h4.lobby.Ready(g6.session.LocalId()) &&
+                  g1.session.Players().size() == 4,
+              "4 players: a guest leaves, a newcomer takes the free slot (not ready)");
+        h4.session.Leave();
+        Pump({&g1, &g3, &g6}, 5, [&] {
+            return !g1.disconnectReason.empty() && !g3.disconnectReason.empty() && !g6.disconnectReason.empty();
+        });
+        Check(g1.disconnectReason == "host closed the session" && g3.disconnectReason == "host closed the session" &&
+                  g6.disconnectReason == "host closed the session",
+              "4 players: the host leaves, all three guests are told");
     }
 
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
