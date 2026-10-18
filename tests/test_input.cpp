@@ -61,6 +61,12 @@ int main() {
           "bad lines skipped and reported", std::to_string(errors.size()) + " errors");
     Check(!errors.empty() && errors[0].rfind("line 1:", 0) == 0, "errors name the line", errors.empty() ? "" : errors[0]);
 
+    // every panel OpenForTest knows (coop_ui.cpp), JOIN FRIEND included
+    errors.clear();
+    const auto o = Parse("open pause\nopen lobby\nopen settings\nopen joinip\nopen friends\n", &errors);
+    Check(errors.empty() && o.size() == 5 && o[4].type == Command::Open && o[4].text == "friends",
+          "open: pause, lobby, settings, joinip, friends", std::to_string(errors.size()) + " errors");
+
     // every button name
     uint16_t all = 0;
     Check(mc::test_input::ParseButtons("UP+DOWN+LEFT+RIGHT+START+BACK+LS+RS+LB+RB+A+B+X+Y", &all) && all == 0xF3FF,

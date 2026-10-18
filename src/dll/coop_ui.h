@@ -23,7 +23,8 @@ public:
     // Tests (dll/test_input.h): the open panel, its rows with their hit boxes (backbuffer pixels) and the selected
     // row, as log lines. Render thread.
     static std::string Describe();
-    // Tests: open a panel the way its menu entry does ("pause", "lobby", "settings", "joinip"); false if unknown.
+    // Tests: open a panel the way its menu entry does ("pause", "lobby", "settings", "joinip", "friends"); false if
+    // unknown.
     static bool OpenForTest(const std::string& which);
 };
 

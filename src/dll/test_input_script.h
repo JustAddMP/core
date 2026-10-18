@@ -10,7 +10,8 @@
 //   click <x> <y>        left click at (x, y) (a move there first)
 //   wheel <+1|-1>        mouse wheel
 //   wait <ms>            pause before the next command
-//   open <panel>         open one of our panels as its menu entry does: pause, lobby, settings, joinip
+//   open <panel>         open one of our panels as its menu entry does: pause, lobby, settings, joinip,
+//                        friends (JOIN FRIEND)
 //   dump                 log the open panel: its rows, their hit boxes and the selected row
 //   log <text>           a line in the log
 #include <cstdint>
@@ -136,8 +137,9 @@ inline std::vector<Command> Parse(const std::string& text, std::vector<std::stri
             c.ms = static_cast<uint32_t>(ms);
         } else if (cmd == "open") {
             c.type = Command::Open;
-            if (!(ls >> c.text) || (c.text != "pause" && c.text != "lobby" && c.text != "settings" && c.text != "joinip")) {
-                bad("open: pause, lobby, settings or joinip");
+            if (!(ls >> c.text) || (c.text != "pause" && c.text != "lobby" && c.text != "settings" &&
+                                    c.text != "joinip" && c.text != "friends")) {
+                bad("open: pause, lobby, settings, joinip or friends");
                 continue;
             }
         } else if (cmd == "dump") {
