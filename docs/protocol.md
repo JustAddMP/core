@@ -288,16 +288,20 @@ every game) and `net/playout.h` (adaptive playout delay instead of a fixed one).
 
 `Session::SetLane(firstMsg, lastMsg, lane)` puts the reliable app messages of an id range on a lane (1..7;
 `kLanes` = 8, lane 0 is the default). The transport keeps one ordered stream per lane: a message is delivered as
-soon as its lane is complete up to it and every lane-0 message sent before it was delivered. Lane 0 is a barrier in
-both directions (a lane-0 message waits for everything sent before it on any lane; a lane message waits for the
-lane-0 messages sent before it), so session control (Welcome, PeerJoined/Left, ...) stays ordered with all app
-traffic. Only messages that do not need to be ordered with other systems' messages belong on a lane; the table is
+soon as its lane is complete up to it; a message on lane k > 0 also waits for the lane-0 messages sent before it, so
+session control (Welcome, PeerJoined, ...) and the default lane stay ahead of the lanes, while lane 0 never waits for
+another lane (a big or lost message on a lane does not hold back lane 0). Consequence: a lane-0 message can overtake
+lane messages sent before it (e.g. a PeerLeft can arrive before that player's last lane messages; handlers must not
+assume the sender is still in Players()). Only messages that do not need to be ordered with other systems' messages belong on a lane; the table is
 not sent, host and guests must set the same one (same build). Relayed messages keep their lane (the host looks it up
 by id). Unreliable messages ignore lanes.
 
-UDP: a reliable unit on lane k > 0 has bit 0x80 in its kind byte and `u8 lane, u16 laneSeq, u16 barrier` after its
-seq (`laneSeq`: its place in the lane; `barrier`: lane-0 units queued before it). Lane-0 units are unchanged (old
-format, delivered in global order), so a build that never uses lanes sends exactly what protocol 8 sent. Steam:
+UDP: a laned reliable unit has bit 0x80 in its kind byte and `u8 lane, u16 laneSeq, u16 barrier` after its seq
+(`laneSeq`: its place in its lane; `barrier`: lane-0 units queued before it). A connection sends the old format (no
+bit, lane 0, delivered in global order) until it first queues a lane > 0 unit; from then on every reliable unit is
+laned (lane-0 units too, continuing lane 0's count). So the handshake (Hello / Reject) is always in the old format
+and an older build still gets its "version mismatch" Reject, and a build that never uses lanes sends exactly what
+protocol 8 sent. Steam:
 lane k's reliable data goes on P2P channel 7 + k; all channels are read every Poll (UNVERIFIED whether Steam orders
 reliable packets per channel; if it does not, lanes simply give no gain there).
 
@@ -381,7 +385,7 @@ u16 seq   (reliable kinds only; 16-bit wrapping)
 varint length, bytes
 ```
 
-With a lane (k > 0, see "Lanes") the kind byte has bit 0x80 and `u8 lane, u16 laneSeq, u16 barrier` follow the seq.
+Laned (see "Lanes"): the kind byte has bit 0x80 and `u8 lane, u16 laneSeq, u16 barrier` follow the seq.
 
 Reliable channel: each unit has a sequence number; window 256 units; the receiver buffers out-of-order units and
 delivers lane-0 units strictly in order (lane units: see "Lanes"). Unacked units are resent after an RTO of

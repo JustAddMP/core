@@ -428,8 +428,8 @@ void TestLanes() {
         send(kMsgLaneA, 1, true);   // lost once
         send(kMsgLaneB, 1, false);  // lane 2: does not wait for A1
         send(kMsgLaneA, 2, false);  // lane 1: after A1
-        send(kMsgLane0, 1, false);  // lane 0: after everything before it
-        send(kMsgLaneB, 2, false);  // lane 2, after C1 (lane 0): waits for C1, so for A1 too
+        send(kMsgLane0, 1, false);  // lane 0: does not wait for the lanes
+        send(kMsgLaneB, 2, false);  // lane 2, after C1 (lane 0): after C1 and B1
         const double until = Seconds() + 2;
         while (Seconds() < until && order.size() < 5) {
             host.session.Poll();
@@ -440,13 +440,14 @@ void TestLanes() {
         for (auto& o : order) got += o + " ";
         const double bDelay = order.size() >= 1 ? (at[0] - t0) * 1000 : -1;
         if (laned) {
-            Check(order.size() == 5 && order[0] == "B1", "lanes: lane 2 is not held back by lane 1's loss",
-                  Fmt("order %s, B1 after %.2f ms", got.c_str(), bDelay));
             auto pos = [&](const char* n) {
                 return static_cast<int>(std::find(order.begin(), order.end(), n) - order.begin());
             };
-            Check(pos("A1") < pos("A2") && pos("A2") < pos("C1") && pos("C1") < pos("B2"),
-                  "lanes: lane order and the lane-0 barrier hold", got);
+            Check(order.size() == 5 && order[0] == "B1" && pos("C1") < pos("A1") && pos("B2") < pos("A1"),
+                  "lanes: lane 2 and lane 0 not held back by lane 1's loss",
+                  Fmt("order %s, B1 after %.2f ms", got.c_str(), bDelay));
+            Check(pos("A1") < pos("A2") && pos("B1") < pos("B2") && pos("C1") < pos("B2"),
+                  "lanes: lane order, lanes after earlier lane 0", got);
         } else {
             const double firstDelay = bDelay;
             Check(order.size() == 5 && order[0] == "A1", "one lane: everything waits for the lost message",

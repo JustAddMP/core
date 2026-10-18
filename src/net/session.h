@@ -173,8 +173,9 @@ public:
 
     // ---- reliable lanes (docs/protocol.md "Lanes") ----
     // Reliable app messages with an id in [firstMsg, lastMsg] go on `lane` (1..kLanes-1; 0 = the default lane):
-    // they are ordered only with the other messages of that lane (and with lane 0), so a lost or large message of
-    // another system does not hold them back. Messages that must stay ordered with each other need the same lane.
+    // they are ordered only with the other messages of that lane (and come after the lane-0 messages sent before
+    // them), so a lost or large message of another system does not hold them back, and they do not hold back lane 0.
+    // Messages that must stay ordered with each other need the same lane.
     // Set it on host and guests alike (OnSessionStart); it is not sent anywhere. Later calls win for overlaps.
     void SetLane(uint16_t firstMsg, uint16_t lastMsg, uint8_t lane);
     uint8_t LaneOf(uint16_t msgId) const;

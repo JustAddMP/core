@@ -437,8 +437,9 @@ int main(int argc, char** argv) {
         Check(tooBig, "reliable: >256 KB refused");
     }
 
-    // ---- 3b. lanes under the same loss (docs/protocol.md "Lanes"): every lane in order, the lane-0 barrier holds,
-    //          a 120 KB message on lane 2 does not hold back lane 1, relayed messages keep their lane ----
+    // ---- 3b. lanes under the same loss (docs/protocol.md "Lanes"): every lane in order, lane messages after the
+    //          lane-0 messages sent before them, a 120 KB message on lane 2 holds back neither lane 1 nor lane 0,
+    //          relayed messages keep their lane ----
     {
         for (Node* n : all) {
             n->session.SetLane(110, 111, 1);
@@ -446,7 +447,7 @@ int main(int argc, char** argv) {
         }
         std::vector<uint32_t> l1Host, l1Relay, l0Host;
         std::vector<std::string> events;  // host: "1:<n>" lane 1, "0:<n>" lane 0, "B" big
-        size_t bigSize = 0, l1BeforeBig = 0;
+        size_t bigSize = 0, l1BeforeBig = 0, l0BeforeBig = 0;
         host.session.On(110, [&](PlayerId, ByteReader& r) {
             l1Host.push_back(r.U32());
             events.push_back("1:" + std::to_string(l1Host.back()));
@@ -456,6 +457,7 @@ int main(int argc, char** argv) {
         host.session.On(112, [&](PlayerId, ByteReader& r) {
             bigSize = r.Rest().size();
             l1BeforeBig = l1Host.size();
+            l0BeforeBig = l0Host.size();
             events.push_back("B");
         });
         host.session.On(104, [&](PlayerId, ByteReader& r) {
@@ -473,25 +475,22 @@ int main(int argc, char** argv) {
         bool ok = Pump(all, 30, [&] {
             return l1Host.size() >= kL && l1Relay.size() >= kL && bigSize && l0Host.size() >= 4;
         });
-        // the barrier: lane-0 message k comes after lane-1 messages 0..50k+49 and after the big one (sent before)
+        // the barrier: lane-1 message n (sent after lane-0 message n / 50 - 1) comes after it
         bool barrier = true;
-        size_t seenL1 = 0;
-        bool seenBig = false;
+        size_t seenL0 = 0;
         for (const std::string& e : events) {
-            if (e == "B")
-                seenBig = true;
+            if (e[0] == '0')
+                ++seenL0;
             else if (e[0] == '1')
-                ++seenL1;
-            else
-                barrier &= seenBig && seenL1 >= (std::stoul(e.substr(2)) + 1) * 50;
+                barrier &= seenL0 >= std::stoul(e.substr(2)) / 50;
         }
         char d[200];
-        std::snprintf(d, sizeof(d), "%.2fs, lane1 %zu relay %zu lane0 %zu big %zu (lane-1 messages before it: %zu)",
-                      Seconds() - t, l1Host.size(), l1Relay.size(), l0Host.size(), bigSize, l1BeforeBig);
+        std::snprintf(d, sizeof(d), "%.2fs, lane1 %zu relay %zu lane0 %zu big %zu (before it: lane 1 %zu, lane 0 %zu)",
+                      Seconds() - t, l1Host.size(), l1Relay.size(), l0Host.size(), bigSize, l1BeforeBig, l0BeforeBig);
         Check(ok && inOrder(l1Host, kL) && inOrder(l1Relay, kL) && inOrder(l0Host, 4) && bigSize == 120 * 1024 &&
                   barrier,
               "lanes: in order per lane under loss, barrier, relay", d);
-        Check(l1BeforeBig > 0, "lanes: lane 1 overtakes a big lane-2 message", d);
+        Check(l1BeforeBig > 0 && l0BeforeBig > 0, "lanes: lanes 1 and 0 overtake a big lane-2 message", d);
     }
 
     // ---- RTT measured under 20 ms simulated one-way latency ----

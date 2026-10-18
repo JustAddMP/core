@@ -22,9 +22,10 @@ constexpr size_t kMaxReliableMessage = 256 * 1024;
 constexpr size_t kMaxUnreliableMessage = 1100;
 
 // Reliable lanes (docs/protocol.md "Lanes"): independent ordered streams per peer, so a lost or large reliable message
-// of one system does not hold back the messages of another (head-of-line blocking). Lane 0 is the default and a
-// barrier: a lane-0 message is delivered only after everything sent before it on any lane. A message on lane k > 0 is
-// ordered only with the earlier messages of lane k. Unreliable messages ignore the lane.
+// of one system does not hold back the messages of another (head-of-line blocking). Lane 0 is the default. A message
+// is ordered with the earlier messages of its lane; one on lane k > 0 also comes after the lane-0 messages sent before
+// it (so session control stays ahead of app traffic), while lane 0 does not wait for other lanes. Unreliable messages
+// ignore the lane.
 constexpr int kLanes = 8;
 
 enum class DisconnectReason : uint8_t {

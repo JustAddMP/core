@@ -74,10 +74,11 @@ enum UnitKind : uint8_t {
     kFragMiddle = 3,
     kFragLast = 4,
 };
-// Reliable unit on a lane > 0 (docs/protocol.md "Lanes"): the kind byte has this bit and the seq is followed by
-// u8 lane, u16 laneSeq, u16 barrier (lane-0 units sent before it). Without it the unit is on lane 0, ordered after
-// every unit before it (the old format). A lane unit is delivered once its lane is complete up to it and every lane-0
-// unit sent before it was delivered, so lane 0 stays ordered with everything in both directions.
+// Laned reliable unit (docs/protocol.md "Lanes"): the kind byte has this bit and the seq is followed by u8 lane,
+// u16 laneSeq (its place in its lane), u16 barrier (lane-0 units queued before it). A connection sends the old
+// format (no bit: lane 0, delivered in global order) until it first uses a lane > 0, then every reliable unit is
+// laned. A laned unit is delivered once its lane is complete up to it; one on a lane > 0 also waits for the lane-0
+// units queued before it (session control stays ahead of app traffic), lane 0 waits for nobody else.
 constexpr uint8_t kKindLaned = 0x80;
 constexpr uint8_t kKindMask = 0x07;
 
@@ -113,8 +114,9 @@ struct OutUnit {
     std::vector<uint8_t> data;
     uint8_t kind = kReliableWhole;
     uint8_t lane = 0;
-    uint16_t laneSeq = 0;  // lane > 0: position in its lane
-    uint16_t barrier = 0;  // lane > 0: lane-0 units sent before it
+    bool laned = false;    // sent in the laned format
+    uint16_t laneSeq = 0;  // position in its lane
+    uint16_t barrier = 0;  // lane > 0: lane-0 units queued before it
     double lastSent = 0;
     uint64_t xmit = 0;     // datagram number it was last sent in (fast retransmit: a later one was acknowledged)
     uint16_t sendCount = 0;
@@ -125,7 +127,8 @@ struct InSlot {
     bool has = false;        // received (acknowledged); kept until recvExpected passes it
     bool delivered = false;  // handed on (a lane unit can be delivered before earlier units of other lanes arrive)
     uint8_t kind = 0;
-    uint8_t lane = 0;        // 0: lane 0 / old format (delivered only in global order)
+    uint8_t lane = 0;
+    bool laned = false;      // false: old format (lane 0, delivered only in global order)
     uint16_t laneSeq = 0;
     uint16_t barrier = 0;
     std::vector<uint8_t> data;
@@ -160,8 +163,8 @@ struct Peer {
     // lanes (docs/protocol.md "Lanes")
     std::array<uint16_t, kLanes> laneSendSeq{};  // next laneSeq to send per lane
     std::array<uint16_t, kLanes> laneNext{};     // next laneSeq to deliver per lane
-    int lanePending = 0;                          // received lane units (lane > 0) not delivered yet
-    uint16_t lane0Delivered = 0;                  // lane-0 units delivered (barrier of lane units)
+    int lanePending = 0;                          // received laned units not delivered yet
+    bool lanesUsed = false;                       // we queued a lane > 0 unit: everything is laned from then on
     // fast retransmit (RACK-like): the newest datagram that carried a unit the peer acknowledged
     uint64_t xmitCounter = 0;  // datagrams with reliable units sent
     uint64_t rackXmit = 0;
@@ -676,7 +679,7 @@ struct UdpTransport::Impl {
             uint32_t len = r.VarU32();
             auto body = r.View(len);
             if (!r.Ok() || kind > kFragLast || (raw & ~(kKindMask | kKindLaned)) ||
-                ((raw & kKindLaned) && (kind == kUnreliable || lane == 0 || lane >= kLanes)))
+                ((raw & kKindLaned) && (kind == kUnreliable || lane >= kLanes)))
                 break;
             if (kind == kUnreliable) {
                 Emit(EventType::Message, p.id, DisconnectReason::None, std::vector<uint8_t>(body.begin(), body.end()),
@@ -693,10 +696,11 @@ struct UdpTransport::Impl {
             s.delivered = false;
             s.kind = kind;
             s.lane = lane;
+            s.laned = (raw & kKindLaned) != 0;
             s.laneSeq = laneSeq;
             s.barrier = barrier;
             s.data.assign(body.begin(), body.end());
-            if (lane) ++p.lanePending;
+            if (s.laned) ++p.lanePending;
         }
         DeliverInOrder(p);
     }
@@ -717,8 +721,8 @@ struct UdpTransport::Impl {
             progress = false;
             for (uint16_t k = 1; k < kWindow && p.lanePending > 0; ++k) {
                 InSlot& s = p.slots[static_cast<uint16_t>(p.recvExpected + k) % kWindow];
-                if (!s.has || s.delivered || s.lane == 0 || s.laneSeq != p.laneNext[s.lane] ||
-                    SeqLess(p.lane0Delivered, s.barrier))
+                if (!s.has || s.delivered || !s.laned || s.laneSeq != p.laneNext[s.lane] ||
+                    (s.lane && SeqLess(p.laneNext[0], s.barrier)))
                     continue;
                 Deliver(p, s);
                 progress = true;
@@ -728,14 +732,14 @@ struct UdpTransport::Impl {
 
     void Deliver(Peer& p, InSlot& s) {
         s.delivered = true;
-        if (s.lane) {
+        if (s.laned) {
             --p.lanePending;
             if (s.laneSeq != p.laneNext[s.lane])  // cannot happen with a sane sender; keep the lane moving
                 Log(kWarn, "udp: peer %llu lane %u out of order (%u, expected %u)",
                     static_cast<unsigned long long>(p.id), s.lane, s.laneSeq, p.laneNext[s.lane]);
             p.laneNext[s.lane] = static_cast<uint16_t>(s.laneSeq + 1);
         } else {
-            ++p.lane0Delivered;
+            ++p.laneNext[0];  // old format: lane 0
         }
         std::vector<uint8_t> data = std::move(s.data);
         s.data = {};
@@ -869,7 +873,7 @@ struct UdpTransport::Impl {
         size_t baseSize = w.Size();
         for (const Ref& ref : refs) {
             const OutUnit* u = ref.unit;
-            size_t need = 1 + (u ? 2 : 0) + (u && u->lane ? 5 : 0) + 3 + ref.data->size();
+            size_t need = 1 + (u ? 2 : 0) + (u && u->laned ? 5 : 0) + 3 + ref.data->size();
             if (w.Size() + need > kMtu && w.Size() > baseSize) {
                 SendDatagram(p.addr, w.Buffer(), &p);
                 begin();
@@ -878,9 +882,9 @@ struct UdpTransport::Impl {
                 w.U8(kUnreliable);
             } else {
                 ref.unit->xmit = p.xmitCounter;
-                w.U8(static_cast<uint8_t>(u->kind | (u->lane ? kKindLaned : 0)));
+                w.U8(static_cast<uint8_t>(u->kind | (u->laned ? kKindLaned : 0)));
                 w.U16(ref.seq);
-                if (u->lane) {
+                if (u->laned) {
                     w.U8(u->lane);
                     w.U16(u->laneSeq);
                     w.U16(u->barrier);
@@ -1045,13 +1049,11 @@ bool UdpTransport::SendOnLane(PeerId id, std::span<const uint8_t> data, Reliabil
     }
     // Lane bookkeeping per unit: its place in its lane, and how many lane-0 units were queued before it.
     auto push = [p, lane](OutUnit&& u) {
+        if (lane) p->lanesUsed = true;
         u.lane = lane;
-        if (lane) {
-            u.laneSeq = p->laneSendSeq[lane]++;
-            u.barrier = p->laneSendSeq[0];
-        } else {
-            ++p->laneSendSeq[0];
-        }
+        u.laned = p->lanesUsed;
+        u.barrier = p->laneSendSeq[0];
+        u.laneSeq = p->laneSendSeq[lane]++;
         p->rq.push_back(std::move(u));
     };
     if (units == 1) {
