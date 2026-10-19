@@ -3,6 +3,33 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.12.0 — 2026-10-20
+
+One replication layer for every kind of copy a game layer shows (docs/replication.md). New features, additive: game
+repos keep building without changes (new fields have defaults). The wire protocol version stays 9; the only new wire
+form is NetRef's 6 bytes, used by game messages. **Nothing here is checked in a game yet**; the numbers below come from
+unit tests with simulated copies.
+
+- `net/replica.h`: `SnapshotTrack` and `Stream`, snapshot interpolation in one place: one playout clock per sender,
+  Hermite between samples, no interpolation across a jump of more than 20 m, extrapolation for at most 0.25 s then
+  held, a `Present` lead of at most 1.5 m (tunable). With its default tuning it gives the same results as the Mafia DE
+  player interpolation it replaces (net_replica compares them on 6000 queries).
+- `net/correction.h`: one `Corrector` for every kind of copy, with foot, car, NPC and traffic presets: nothing inside a
+  dead zone, beyond it a blend capped at a share of the target's speed (0.15 m/s when it stands), a snap when far off,
+  on a height difference, on a teleport or when stuck.
+- `net/authority.h`: `NetRef {home, kind, local}` (6 bytes on the wire); `OwnershipBook` (claim epochs: the higher
+  epoch wins, an equal one keeps the owner, simultaneous claims go to the lower id, a leaving player's things go to
+  the fallback owner); `RegionAuthority` (who simulates the ambient world: the host within 250 m of himself, else the
+  nearest player, kept until 400 m away and another player is 50 m nearer).
+- `LocomotionController`: a gait hint (the sender's own gait is used as is, only the speed multiplier absorbs the
+  error); hidden nudges (dead zone 0.3 m, was 0.9; at most max(0.15, 0.35 x speed) m/s); commands planned for the
+  copy's response lag (0.15 s, an estimate); a braking target's stop point; the carried shortfall only while the copy
+  is behind. Simulated AI walker (speeds off by 20 %, 150-200 ms lag, turn limit): gait 95-98 %, p95 0.34-0.41 m
+  moving, 0.07-0.09 m standing, no snaps. The response-lag planning and the new nudge rule also apply without a hint.
+- `VehicleController`: a pinned copy gets its physics back after 1.5 s, doubling to 8 s (was 5 to 40 s); the doubling
+  resets after 10 s keeping up. `pinnedFor` and `retryIn` for traces.
+- Tests: `net_replica` (new); `net_motion` gait hint (simulated AI walker) and pin policy.
+
 ## v0.11.0 — 2026-10-18
 
 A JOIN FRIEND panel, a working physical gamepad on the co-op panels with button prompts like the games' menus,
