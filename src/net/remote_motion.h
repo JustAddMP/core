@@ -9,13 +9,14 @@
 //                         does not need the game's nominal walk/run speeds. When even the fastest multiplier cannot
 //                         reach the wanted speed (a game whose AI sprint is slower than a player's), the shortfall is
 //                         carried as a small per-tick nudge, so the copy keeps up instead of falling behind and
-//                         snapping.
+//                         snapping. With the sender's reported gait (gaitHint) the gait is his and only the
+//                         multiplier absorbs the error; commands are planned for the copy's response lag (core 0.12).
 //   VehicleController     how to keep a car copy on its target: let its own physics carry it (the remote driver's
 //                         controls are applied by the caller) with a blended correction plus a wanted velocity for
 //                         the copy (a game whose position setter zeroes the body's speed gives it back right after),
 //                         or pin it to the target every tick when its physics does not keep up (detected
-//                         automatically, retried after a while); a power governor so a copy never outruns its
-//                         target.
+//                         automatically, its physics retried after 1.5 s doubling to 8 s); a power governor so a copy
+//                         never outruns its target.
 //
 // Plus quantisation helpers for control values on the wire. Pure math: no game, transport or OS calls; the same
 // calls in the same order give the same results. One controller per remote player / car; not thread-safe.
