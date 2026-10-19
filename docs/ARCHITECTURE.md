@@ -40,7 +40,10 @@ src/
                           start, in-game state; docs/protocol.md "Lobby"), remote_motion (core 0.9: controllers that
                           drive a locally simulated copy of a remote character with the game's own locomotion
                           (gait, speed multiplier calibrated at run time, walk point, small nudges / snaps) and keep a
-                          car copy on target (blended correction or pinned, power governor); 8-bit control packing)
+                          car copy on target (blended correction or pinned, power governor); 8-bit control packing),
+                          playout (adaptive playout delay per sender), replica / correction / authority (core 0.12:
+                          the shared replication layer - snapshot interpolation per sender, one correction policy for
+                          every kind of copy, NetRef ids, ownership epochs, region authority; docs/replication.md)
   render/                 present_hook (IDXGISwapChain::Present/ResizeBuffers -> per-frame tick on the render thread),
                           overlay + overlay.hlsl (D3D11 text/rect renderer), ui_font (GDI glyph atlas), font8x16.h
   swf/                    swf_patch: SWF/GFX + AVM2 (ABC) patcher (constant pool append, method prologues, assembler)
@@ -61,11 +64,12 @@ src/
                           value, e.g. --password, refuse to start without one), install (--install / --uninstall)
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
-tests/                    net_loopback, net_password, net_kick, net_reconnect, net_lobby, net_interest, net_motion, net_fuzz, proxy_test,
+tests/                    net_loopback, net_password, net_kick, net_reconnect, net_lobby, net_interest, net_motion, net_replica, net_fuzz, proxy_test,
                           pending_join, crash_dump, launcher_args, config_set, test_input, steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py
-docs/                     ARCHITECTURE.md (this), protocol.md (sessions + transports), interest.md
+docs/                     ARCHITECTURE.md (this), protocol.md (sessions + transports), interest.md, replication.md (how a
+                          game layer shows what another game simulates: time base, interpolation, correction, authority)
 ```
 
 Namespaces: `mc` (GameInfo, GameModule, Mod, Coop, CoopUi), `mc::core`, `mc::net`, `mc::render`, `mc::swf`,

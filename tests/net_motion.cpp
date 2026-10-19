@@ -2,11 +2,14 @@
 // nlerp, the locomotion controller against a simulated AI walker (its real walk/run/sprint speeds differ from the
 // controller's first guess) and the vehicle controller against a car whose physics keeps its velocity and one whose
 // teleports zero it (pinned, retried), one whose teleports zero it but gets the wanted velocity back, and an AI
-// sprint slower than the player's (carried shortfall). Prints PASS/FAIL per check; exits non-zero on any failure.
+// sprint slower than the player's (carried shortfall); the gait hint (the sender's own gait) against an honest AI
+// walker (speed error, response lag, turn rate limit) on a recorded-like path; the vehicle pin / retry policy.
+// Prints PASS/FAIL per check; exits non-zero on any failure.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -335,7 +338,7 @@ void TestVehicle(CarPhysics mode) {
     } else {
         Check(firstPin > 0 && firstPin * dt < 2.5f, "car whose teleport zeroes its speed: pinned within 2.5 s",
               Fmt("after %.2f s", firstPin * dt));
-        Check(vc.Retries() >= 1 && vc.Pins() >= 2, "pinned copy retries its physics after 5 s and is pinned again",
+        Check(vc.Retries() >= 1 && vc.Pins() >= 2, "pinned copy retries its physics after 1.5 s and is pinned again",
               Fmt("%.0f pins, %.0f retries", vc.Pins(), vc.Retries()));
     }
 }
@@ -371,6 +374,323 @@ void TestVehicleRules() {
     Check(frames > 80 && frames < 100, "copy 2 m off for 1.5 s although blended: pinned", Fmt("after %.2f s", frames / 60.0));
 }
 
+
+// ---- gait hint: an honest simulation of the game's AI walker ------------------------------------------------------
+// The copy: its real gait speeds are off by up to 20 % (walk 20 % slow, run 20 % fast, sprint 15 % slow), it acts on
+// a walk command 150 ms after it was given (the game's AI task start), turns at most 360 deg/s (slower while turning
+// hard), changes its speed at most 10 m/s^2 and brakes to arrive at a walk point. Nudges and snaps are position sets
+// the glue applies at once. The remote player: a human whose own game reports his gait (PlayerState mode, walk while
+// still slowing down), whose velocity (speed and direction) changes at most 10 m/s^2. A second run: 200 ms lag and
+// the opposite speed errors.
+struct LaggedWalker {
+    float realSpeed[4] = {0, 1.5f * 0.8f, 4.0f * 1.2f, 6.5f * 0.85f};
+    float lag = 0.15f;
+    float x = 0, y = 0, hx = 1, hy = 0, speed = 0;
+    Gait gait = Gait::Stand;
+    float mult = 1, tx = 0, ty = 0;
+    bool walking = false;
+    struct Pending {
+        float at;
+        Gait gait;
+        float mult;
+        bool reissue;
+        float tx, ty;
+    };
+    std::deque<Pending> queue;
+    float clock = 0;
+    static constexpr float kTurn = 360.0f * 3.14159265f / 180, kAccel = 10.0f;  // m/s^2, as the player (the same game, the same body)
+
+    void Apply(const LocomotionCommand& c, const Vec3& target) {
+        if (c.fix == LocomotionCommand::Fix::Snap) {
+            x = target.x;
+            y = target.y;
+            speed = 0;
+        } else if (c.fix == LocomotionCommand::Fix::Nudge) {
+            x += c.nudge.x;
+            y += c.nudge.y;
+        }
+        queue.push_back({clock + lag, c.gait, c.speedMult, c.reissue, c.moveTo.x, c.moveTo.y});
+    }
+    void Step(float dt) {
+        clock += dt;
+        while (!queue.empty() && queue.front().at <= clock) {
+            const Pending& p = queue.front();
+            if (p.reissue) {
+                gait = p.gait == Gait::Stand ? Gait::Walk : p.gait;
+                walking = true;
+                tx = p.tx;
+                ty = p.ty;
+            }
+            mult = p.gait == Gait::Stand ? 1.0f : p.mult;
+            queue.pop_front();
+        }
+        float want = 0, dx = tx - x, dy = ty - y;
+        const float d = std::sqrt(dx * dx + dy * dy);
+        if (walking && d > 0.1f) {
+            want = realSpeed[static_cast<int>(gait)] * mult;
+            // turn toward the walk point at most kTurn
+            const float a = std::atan2(hx * dy - hy * dx, hx * dx + hy * dy);
+            const float r = std::clamp(a, -kTurn * dt, kTurn * dt);
+            const float c = std::cos(r), s = std::sin(r);
+            const float nx = hx * c - hy * s, ny = hx * s + hy * c;
+            hx = nx;
+            hy = ny;
+            want *= std::max(0.3f, std::cos(a));  // slows down while turning (on the spot beyond 70 deg)
+            want = std::min(want, std::sqrt(2 * kAccel * d));  // a walk to a point arrives there (brakes in time)
+        } else if (walking) {
+            walking = false;  // arrived: stands
+        }
+        speed += std::clamp(want - speed, -kAccel * dt, kAccel * dt);
+        x += hx * speed * dt;
+        y += hy * speed * dt;
+    }
+};
+
+struct Leg {
+    float seconds;
+    int gait;        // what his game reports: 0 idle, 1 walk, 2 run, 3 sprint
+    float zigzagDeg; // heading swings +-this every zigzagPeriod
+    float turnDeg;   // heading change at the start of the leg
+};
+
+double P95(std::vector<float> v) {
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    return v[static_cast<size_t>(std::min<double>(static_cast<double>(v.size() - 1), std::ceil(static_cast<double>(v.size()) * 0.95) - 1))];
+}
+
+struct HintRun {
+    int ticks = 0, match = 0, executed = 0, snaps = 0;
+    double p95Moving = 0, p95Standing = 0;
+};
+
+HintRun RunHintPath(float lag, float walkErr, float runErr, float sprintErr) {
+    LocomotionController ctl;
+    LaggedWalker w;
+    w.lag = lag;
+    w.realSpeed[1] = 1.5f * walkErr;
+    w.realSpeed[2] = 4.0f * runErr;
+    w.realSpeed[3] = 6.5f * sprintErr;
+    const float dt = 1.0f / 60;
+    const float gaitSpeed[4] = {0, 1.6f, 4.4f, 6.3f};  // the player's own speeds
+    const std::vector<Leg> legs = {
+        // straight run, sprint with a gentle weave, run zig-zag, stop
+        {1.5f, 0, 0, 0},   {6.0f, 2, 0, 0},    {8.0f, 3, 15, 30}, {6.0f, 2, 30, 0},  {3.0f, 0, 0, 0},
+        // walk, stop-and-go (short stops, run and sprint bursts with turns)
+        {4.0f, 1, 0, 90},  {1.0f, 0, 0, 0},    {2.0f, 2, 0, 0},   {1.0f, 0, 0, 0},   {2.5f, 3, 0, -60},
+        {1.0f, 0, 0, 0},   {5.0f, 1, 30, 0},   {2.5f, 0, 0, 0},
+        // turn around into a sprint zig-zag, run, stop
+        {8.0f, 3, 20, 180}, {4.0f, 2, 0, 45},  {3.0f, 0, 0, 0},
+    };
+    float px = 0, py = 0, pvx = 0, pvy = 0, pspeed = 0, heading = 0;
+    const float accel = 10;  // m/s^2: how fast the player's own character changes its velocity (speed and direction)
+    int ticks = 0, match = 0, snaps = 0, executed = 0;
+    std::deque<int> hints;  // the hint `lag` ago is what the walker can be doing now
+    const size_t lagTicks = static_cast<size_t>(std::lround(lag / dt)) + 1;
+    std::vector<float> moving, standing;
+    float standFor = 0;
+    float zig = 0;
+    for (const Leg& leg : legs) {
+        heading += leg.turnDeg * 3.14159265f / 180;
+        for (float s = 0; s < leg.seconds; s += dt) {
+            // the player
+            const float want = gaitSpeed[leg.gait];
+            if (leg.zigzagDeg > 0)
+                zig = (std::fmod(s, 2.4f) < 1.2f ? 1.0f : -1.0f) * leg.zigzagDeg * 3.14159265f / 180;
+            else
+                zig = 0;
+            const float hd = heading + zig;
+            const float dvx = std::cos(hd) * want - pvx, dvy = std::sin(hd) * want - pvy;
+            const float dv = std::sqrt(dvx * dvx + dvy * dvy), dk = dv > accel * dt ? accel * dt / dv : 1.0f;
+            pvx += dvx * dk;
+            pvy += dvy * dk;
+            pspeed = std::sqrt(pvx * pvx + pvy * pvy);
+            const float vx = pvx, vy = pvy;
+            px += vx * dt;
+            py += vy * dt;
+            const int hint = leg.gait == 0 && pspeed > 0.35f ? 1 : leg.gait;  // still slowing down: his game says walk
+            LocomotionInput in;
+            in.target = {px, py, 0};
+            in.targetVel = {vx, vy, 0};
+            in.heading[0] = std::cos(hd);
+            in.heading[1] = std::sin(hd);
+            in.sprint = hint == 3;
+            in.gaitHint = static_cast<int8_t>(hint);
+            in.haveCopy = true;
+            in.copy = {w.x, w.y, 0};
+            in.copyHeading[0] = w.hx;
+            in.copyHeading[1] = w.hy;
+            in.dt = dt;
+            const LocomotionCommand c = ctl.Update(in);
+            if (c.fix == LocomotionCommand::Fix::Snap) ++snaps;
+            w.Apply(c, in.target);
+            w.Step(dt);
+            ++ticks;
+            if (static_cast<int>(c.gait) == hint) ++match;
+            hints.push_back(hint);
+            if (hints.size() > lagTicks) hints.pop_front();
+            const int was = hints.front();
+            const bool wStands = !w.walking || w.speed < 0.3f;
+            if (was == 0 ? wStands : static_cast<int>(w.gait) == was) ++executed;
+            standFor = pspeed < 0.05f ? standFor + dt : 0;
+            if (pspeed > 0.35f && s > 0.5f) moving.push_back(c.error);
+            if (standFor > 1.0f) standing.push_back(c.error);
+        }
+    }
+    HintRun r;
+    r.ticks = ticks;
+    r.match = match;
+    r.executed = executed;
+    r.snaps = snaps;
+    r.p95Moving = P95(moving);
+    r.p95Standing = P95(standing);
+    return r;
+}
+
+void TestGaitHint() {
+    const float dt = 1.0f / 60;
+    struct Variant {
+        const char* name;
+        float lag, walk, run, sprint;
+    };
+    const Variant variants[] = {
+        {"lag 150 ms, walk -20 %, run +20 %, sprint -15 %", 0.15f, 0.8f, 1.2f, 0.85f},
+        {"lag 200 ms, walk +20 %, run -20 %, sprint +15 %", 0.20f, 1.2f, 0.8f, 1.15f},
+    };
+    for (const Variant& v : variants) {
+        const HintRun r = RunHintPath(v.lag, v.walk, v.run, v.sprint);
+        const std::string n = std::string("gait hint (") + v.name + "): ";
+        Check(r.match >= r.ticks * 95 / 100, (n + "commanded gait = sender's >= 95 % of ticks").c_str(),
+              Fmt("%.1f %%", 100.0 * r.match / r.ticks));
+        Check(r.executed >= r.ticks * 90 / 100, (n + "walker's gait = sender's (lag ago) >= 90 %").c_str(),
+              Fmt("%.1f %%", 100.0 * r.executed / r.ticks));
+        Check(r.p95Moving <= 0.6, (n + "p95 error moving <= 0.6 m").c_str(), Fmt("%.2f m", r.p95Moving));
+        Check(r.p95Standing <= 0.25, (n + "p95 error standing <= 0.25 m").c_str(), Fmt("%.2f m", r.p95Standing));
+        Check(r.snaps == 0, (n + "no snaps on a smooth path").c_str(), Fmt("%.0f snaps", r.snaps));
+    }
+
+    // hint 0 but the copy is 2 m off: it walks there (does not stand), and stands once close
+    LocomotionController h0;
+    LocomotionInput in;
+    in.gaitHint = 0;
+    in.haveCopy = true;
+    in.target = {2, 0, 0};
+    in.dt = dt;
+    Check(h0.Update(in).gait == Gait::Walk, "hint idle, copy 2 m off: walks there");
+    in.copy = {1.85f, 0, 0};
+    Check(h0.Update(in).gait == Gait::Stand, "hint idle, copy within the stop distance: stands");
+    in.copy = {1.5f, 0, 0};
+    Check(h0.Update(in).gait == Gait::Stand, "... and stays standing up to the start distance");
+    // hint run while the wanted speed is a walk: run with a low multiplier, not a walk
+    LocomotionController h2;
+    in.gaitHint = 2;
+    in.target = {0, 0, 0};
+    in.copy = {0, 0, 0};
+    in.targetVel = {1.5f, 0, 0};
+    const LocomotionCommand c2 = h2.Update(in);
+    Check(c2.gait == Gait::Run && std::fabs(c2.speedMult - 0.6f) < 1e-4f, "hint run at walk speed: run at the lowest multiplier",
+          Fmt("mult %.2f", c2.speedMult));
+    in.gaitHint = -1;
+    LocomotionController hn;
+    Check(hn.Update(in).gait == Gait::Walk, "no hint: the speed decides (walk)");
+}
+
+// ---- vehicle pin policy -------------------------------------------------------------------------------------------
+// A copy whose physics follows only when `fine(t)`: otherwise it crawls at 1 m/s whatever it is given. Pinned: set on
+// the target with the wanted velocity (the glue).
+void RunPinCase(float seconds, bool (*fine)(float), std::vector<float>& retryTimes, std::vector<float>& pinTimes,
+                float& maxPinned, bool& pinnedAtEnd, float& lastPinAt) {
+    VehicleController vc;
+    const float dt = 1.0f / 60;
+    Vec3 t, p, v;
+    maxPinned = 0;
+    lastPinAt = -1;
+    for (int i = 0; i < static_cast<int>(seconds / dt); ++i) {
+        const float now = i * dt;
+        t.x += 15 * dt;
+        VehicleInput in;
+        in.target = t;
+        in.targetVel = {15, 0, 0};
+        in.haveCopy = true;
+        in.copy = p;
+        in.copyVel = v;
+        in.power = 0.6f;
+        in.dt = dt;
+        const VehicleCommand c = vc.Update(in);
+        if (c.justPinned) {
+            pinTimes.push_back(now);
+            lastPinAt = now;
+        }
+        if (c.retried) retryTimes.push_back(now);
+        maxPinned = std::max(maxPinned, c.pinnedFor);
+        if (c.fix == VehicleCommand::Fix::Pin || c.fix == VehicleCommand::Fix::Snap) {
+            p = t;
+            v = c.vel;
+        } else if (c.fix == VehicleCommand::Fix::Blend) {
+            p.x += c.nudge.x;
+            v = c.vel;
+        }
+        if (!fine(now)) v.x = std::min(v.x, 1.0f);
+        p.x += v.x * dt;
+        pinnedAtEnd = c.pinned;
+    }
+}
+
+void TestPinPolicy() {
+    std::vector<float> retries, pins;
+    float maxPinned = 0, lastPin = -1;
+    bool pinnedEnd = false;
+    RunPinCase(20, [](float t) { return t >= 2.0f; }, retries, pins, maxPinned, pinnedEnd, lastPin);
+    const float firstFree = retries.empty() ? 99 : retries.front();
+    Check(!pins.empty() && pins.front() < 2.0f, "slow physics for 2 s: pinned", Fmt("at %.2f s", pins.empty() ? -1 : pins.front()));
+    Check(firstFree >= 2.0f && firstFree - 2.0f <= 2.0f, "... physics back within 2 s of recovering",
+          Fmt("retried at %.2f s", firstFree));
+    Check(pins.size() == 1 && !pinnedEnd, "... and stays unpinned afterwards", Fmt("%.0f pins", static_cast<double>(pins.size())));
+
+    retries.clear();
+    pins.clear();
+    RunPinCase(60, [](float) { return false; }, retries, pins, maxPinned, pinnedEnd, lastPin);
+    float maxGap = 0;
+    for (size_t i = 1; i < retries.size(); ++i) maxGap = std::max(maxGap, retries[i] - retries[i - 1]);
+    Check(maxPinned <= 8.0f + 1e-3f, "permanently slow: never pinned longer than 8 s at a time", Fmt("%.2f s", maxPinned));
+    Check(retries.size() >= 6 && maxGap <= 8.0f + 1.2f + 0.05f, "permanently slow: retried at most every 8 s (+ the 1 s re-pin)",
+          Fmt("%.0f retries, max gap %.2f s", static_cast<double>(retries.size()), maxGap));
+    Check(retries.size() >= 3 && retries[1] - retries[0] > retries[0] - pins[0] + 0.5f,
+          "permanently slow: the retry interval doubles");
+
+    // the doubling resets after the copy kept up unpinned for 10 s
+    retries.clear();
+    pins.clear();
+    RunPinCase(40, [](float t) { return (t >= 3.5f && t < 22.0f) ? true : t >= 22.0f + 10.0f; }, retries, pins, maxPinned,
+               pinnedEnd, lastPin);
+    // phase 1 (0-3.5 s): pinned at ~1 s, retried at 2.5 s, re-pinned ~3.5 s (3 s); fine until 22 s; slow again:
+    // pinned at ~23 s for retryFirst again (1.5 s), not the doubled 3 s
+    float secondSeries = -1;
+    for (size_t i = 0; i < pins.size(); ++i)
+        if (pins[i] > 20) {
+            for (float r : retries)
+                if (r > pins[i]) {
+                    secondSeries = r - pins[i];
+                    break;
+                }
+            break;
+        }
+    Check(secondSeries > 0 && std::fabs(secondSeries - 1.5f) < 0.05f, "after 10 s kept up unpinned: the next pin retries after 1.5 s again",
+          Fmt("%.2f s", secondSeries));
+
+    VehicleController vc;
+    VehicleInput in;
+    in.haveCopy = true;
+    in.target = {0, 0, 0};
+    in.targetVel = {5, 0, 0};
+    in.copyVel = {30, 0, 0};
+    in.dt = 0.1f;
+    const VehicleCommand c0 = vc.Update(in);
+    const VehicleCommand c1 = vc.Update(in);
+    Check(c0.justPinned && c0.pinnedFor == 0 && std::fabs(c1.pinnedFor - 0.1f) < 1e-5f && std::fabs(c1.retryIn - 1.4f) < 1e-4f,
+          "pinnedFor / retryIn for traces", Fmt("%.2f %.2f", c1.pinnedFor, c1.retryIn));
+}
+
 }  // namespace
 
 int main() {
@@ -382,6 +702,8 @@ int main() {
     TestVehicle(CarPhysics::ZeroedByTeleport);
     TestVehicle(CarPhysics::ZeroedButVelocityGiven);
     TestVehicleRules();
+    TestGaitHint();
+    TestPinPolicy();
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
 }
