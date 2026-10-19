@@ -48,13 +48,27 @@ struct LocomotionTuning {
     // standing: below this target speed and within startDist the copy stands; it starts again beyond startDist
     float standSpeed = 0.35f, stopDist = 0.25f, startDist = 0.6f;
     float corrGain = 1.2f;         // 1/s: wanted velocity = target velocity + corrGain x position error
-    float maxCorrSpeed = 2.5f;     // m/s: at most this much of the wanted velocity comes from the error
+    float responseLag = 0.15f;     // s: the copy acts on a command this much later (the game's AI); the error is
+                                   //    predicted that far ahead from both velocities and the target's
+                                   //    acceleration, and the copy is asked for the velocity the target will
+                                   //    have then (0: the error and velocity now)
+    float maxAccel = 15.0f;        // m/s^2: the target's estimated acceleration is bounded by this
+    float brakeAccel = 2.0f;       // m/s^2: a target braking harder than this (and not running / sprinting by
+    float brakeHorizon = 0.8f;     //    his gait) that stands within this many s: the copy walks to his stop point
+    float maxCorrSpeed = 2.5f;     // m/s: at most this much of the wanted velocity comes from the error ...
+    float corrRestSpeed = 1.0f;    // m/s: ... and at most max(this, corrSpeedShare x target speed): a copy that
+    float corrSpeedShare = 0.5f;   //    runs much faster than its target overshoots every stop and turn
     float lookAhead = 0.6f;        // s: the walk point is this far ahead along the wanted velocity
     float lookMin = 2.0f;          // m: and at least this far
     float reissueAngleDeg = 12;    // re-aim the walk when the wanted direction turned more than this
     float reissueInterval = 0.35f; // s: and at least this often while moving
-    float nudgeStart = 0.9f;       // m: errors beyond this are nudged away (only the excess)
+    // Position fix (the correction rules of net/correction.h): errors beyond nudgeStart are nudged away (only the
+    // excess, nudgeGain per s), at most max(nudgeRestSpeed, nudgeSpeedShare x target speed) m/s so the correction
+    // stays hidden in the walk. (Before core 0.12: nudgeStart 0.9, uncapped - nudgeRestSpeed 1e9.)
+    float nudgeStart = 0.3f;       // m
     float nudgeGain = 2.0f;        // 1/s
+    float nudgeRestSpeed = 0.15f;  // m/s: cap while the remote player stands
+    float nudgeSpeedShare = 0.35f; // cap as a share of his speed while he moves
     float snapDist = 3.5f;         // m: put the copy at the target
     float snapHeight = 3.0f;       // m: vertical error that snaps (doubled while the remote player is in the air)
     float stuckDist = 0.5f;        // m: the remote player stands but the copy is this far off ...
@@ -73,6 +87,11 @@ struct LocomotionInput {
     Vec3 targetVel;            // his velocity (z ignored)
     float heading[2] = {0, 1}; // his facing, unit vector in the ground plane
     bool sprint = false;       // his sprint flag
+    // The gait his game reports (0 idle, 1 walk, 2 run, 3 sprint; -1 unknown). Known: the copy uses that gait (it
+    // stands only when the hint is 0 and it is within the stop distance; a hint of 0 farther off walks there) and
+    // only the speed multiplier (then the carried nudge) absorbs the error. Unknown: the gait is chosen from the
+    // wanted speed with hysteresis.
+    int8_t gaitHint = -1;
     bool inAir = false;        // jumping / falling
     bool haveCopy = false;     // copy position below is known (false: just spawned, hidden, in a car)
     Vec3 copy;                 // the copy's position (as reported after the previous command was applied)
@@ -95,6 +114,7 @@ struct LocomotionCommand {
     float want = 0;        // wanted ground speed (m/s): target speed plus the bounded error correction
     float measured = -1;   // the copy's speed measured over the last window (m/s), -1 none yet
     float carry = 0;       // m/s of the wanted speed carried by nudging (the gait could not reach it)
+    bool stopping = false; // the target brakes to a stop: moveTo is where he will stand
 };
 
 class LocomotionController {
@@ -127,6 +147,12 @@ private:
     float measuredMult_ = 1;  // the multiplier lastMeasured_ was walked with
     bool haveLast_ = false;
     Vec3 last_;
+    bool haveVel_ = false;
+    float copyVel_[2] = {0, 0};  // the copy's walking velocity (smoothed)
+    bool haveTv_ = false;
+    bool stopping_ = false;
+    float lastTv_[2] = {0, 0};
+    float tAcc_[2] = {0, 0};     // the target's acceleration (smoothed)
 };
 
 // ---- vehicles ------------------------------------------------------------------------------------------------------
@@ -144,8 +170,9 @@ struct VehicleTuning {
     float minMove = 0.002f;     // m: a smaller blended correction (and rotation step) is not applied at all
     float velGain = 1.5f;       // 1/s: wanted copy velocity = target velocity + velGain x position error ...
     float maxVelCorr = 4.0f;    // m/s: ... at most this much of it from the error
-    float retryFirst = 5.0f;    // s: a pinned copy gets its physics back after this long (what kept it from moving
-    float retryMax = 40.0f;     //    may be gone: engine started, other ground); doubled after each pin, up to this
+    float retryFirst = 1.5f;    // s: a pinned copy gets its physics back after this long (what kept it from moving
+    float retryMax = 8.0f;      //    may be gone: engine started, other ground); doubled after each pin, up to this
+    float retryReset = 10.0f;   // s: a copy that kept up unpinned this long starts again at retryFirst
 };
 
 struct VehicleInput {
@@ -173,6 +200,8 @@ struct VehicleCommand {
     Why why = Why::None;
     bool justPinned = false;      // pinned in this update
     bool retried = false;         // a pinned copy got its physics back in this update
+    float pinnedFor = 0;          // s this copy has been pinned (0: not pinned)
+    float retryIn = 0;            // s until a pinned copy gets its physics back (0: not pinned)
     float tspeed = 0, cspeed = 0; // target / copy speed (m/s)
     float rotErrDeg = 0;          // angle between copy and target rotation
 };
@@ -191,6 +220,8 @@ private:
     bool pinned_ = false;
     float slowT_ = 0, lagT_ = 0;
     float pinnedT_ = 0, retryAfter_ = 0;
+    float freeT_ = 0;   // s unpinned since the last retry
+    int level_ = 0;     // pins in the current doubling series (reset after retryReset unpinned)
     VehicleCommand::Why why_ = VehicleCommand::Why::None;
     int pins_ = 0, retries_ = 0;
 };

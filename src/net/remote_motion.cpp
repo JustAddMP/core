@@ -1,5 +1,7 @@
 #include "net/remote_motion.h"
 
+#include "net/correction.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -66,6 +68,10 @@ void LocomotionController::Reset() {
     stuckT_ = blockedT_ = 0;
     winValid_ = false;
     haveLast_ = false;
+    haveVel_ = false;
+    copyVel_[0] = copyVel_[1] = 0;
+    haveTv_ = false;
+    tAcc_[0] = tAcc_[1] = 0;
     lastNudge_ = {};
     lastMeasured_ = -1;
 }
@@ -104,6 +110,15 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         measuredMult_ = std::max(mult_, 0.1f);
     }
     c.measured = lastMeasured_;
+    // The copy's walking velocity (per tick, smoothed; nudges are not walking): predicts where it will be when the
+    // command takes effect (responseLag).
+    if (haveLast_ && dt > 1e-4f) {
+        const float vx = (in.copy.x - last_.x - lastNudge_.x) / dt, vy = (in.copy.y - last_.y - lastNudge_.y) / dt;
+        const float a = haveVel_ ? std::min(1.0f, dt / 0.1f) : 1.0f;
+        copyVel_[0] += (vx - copyVel_[0]) * a;
+        copyVel_[1] += (vy - copyVel_[1]) * a;
+        haveVel_ = true;
+    }
     last_ = in.copy;
     haveLast_ = true;
     lastNudge_ = {};
@@ -136,13 +151,20 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         stuckT_ = blockedT_ = 0;
         winValid_ = false;
         haveLast_ = false;
+        haveVel_ = false;
+        copyVel_[0] = copyVel_[1] = 0;
         issued_ = false;  // walk again from the new spot
         sinceIssue_ = 1e9f;
-    } else if (err > t_.nudgeStart) {
-        const float k = (err - t_.nudgeStart) / err * std::min(1.0f, t_.nudgeGain * dt);
-        c.fix = LocomotionCommand::Fix::Nudge;
-        c.nudge = {ex * k, ey * k, 0};
-        lastNudge_ = c.nudge;
+    } else {
+        // the blend rule of net/correction.h: the excess beyond the dead zone, at a speed hidden in the walk
+        const float step = correction::BlendStep(err, t_.nudgeStart, t_.nudgeGain, t_.nudgeSpeedShare,
+                                                 t_.nudgeRestSpeed, tspeed, dt);
+        if (step > 0) {
+            const float k = step / err;
+            c.fix = LocomotionCommand::Fix::Nudge;
+            c.nudge = {ex * k, ey * k, 0};
+            lastNudge_ = c.nudge;
+        }
     }
 
     // Calibration: a window measured while gait and multiplier were steady tells the gait's speed at multiplier 1.
@@ -155,24 +177,59 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         base_[g] += (est - base_[g]) * alpha;
     }
 
-    // Wanted velocity: the target's plus a bounded share of the error.
-    float cx = ex * t_.corrGain, cy = ey * t_.corrGain;
-    const float cl = Len2(cx, cy);
-    if (cl > t_.maxCorrSpeed) {
-        cx *= t_.maxCorrSpeed / cl;
-        cy *= t_.maxCorrSpeed / cl;
+    // Wanted velocity: the target's plus a bounded share of the error - the error expected when this command takes
+    // effect (both moved on by their velocities for responseLag), so a turn or a stop is answered before the copy
+    // overshoots instead of after.
+    // The target's acceleration (from its velocity, smoothed, bounded) says where a start / stop / turn is going:
+    // the copy is asked for the velocity the target will have then.
+    if (haveTv_ && dt > 1e-4f) {
+        const float ax = (in.targetVel.x - lastTv_[0]) / dt, ay = (in.targetVel.y - lastTv_[1]) / dt;
+        const float k = std::min(1.0f, dt / 0.1f);
+        tAcc_[0] += (ax - tAcc_[0]) * k;
+        tAcc_[1] += (ay - tAcc_[1]) * k;
+        const float al = Len2(tAcc_[0], tAcc_[1]);
+        if (al > t_.maxAccel) {
+            tAcc_[0] *= t_.maxAccel / al;
+            tAcc_[1] *= t_.maxAccel / al;
+        }
     }
-    const float wx = in.targetVel.x + cx, wy = in.targetVel.y + cy;
+    lastTv_[0] = in.targetVel.x;
+    lastTv_[1] = in.targetVel.y;
+    haveTv_ = true;
+    const float lag = haveVel_ ? t_.responseLag : 0.0f;
+    float ftx = in.targetVel.x + tAcc_[0] * lag, fty = in.targetVel.y + tAcc_[1] * lag;
+    // a decelerating target does not reverse
+    if (ftx * in.targetVel.x + fty * in.targetVel.y < 0) ftx = fty = 0;
+    const float pex = ex + (in.targetVel.x - copyVel_[0]) * lag + 0.5f * tAcc_[0] * lag * lag;
+    const float pey = ey + (in.targetVel.y - copyVel_[1]) * lag + 0.5f * tAcc_[1] * lag * lag;
+    float cx = pex * t_.corrGain, cy = pey * t_.corrGain;
+    const float cl = Len2(cx, cy);
+    const float corrCap = std::min(t_.maxCorrSpeed, std::max(t_.corrRestSpeed, t_.corrSpeedShare * tspeed));
+    if (cl > corrCap) {
+        cx *= corrCap / cl;
+        cy *= corrCap / cl;
+    }
+    const float wx = ftx + cx, wy = fty + cy;
     const float want = Len2(wx, wy);
 
-    // Gait with hysteresis.
     Gait g = gait_;
-    if (g == Gait::Stand) {
+    if (in.gaitHint >= 0) {
+        // The sender's own gait: used as is (the multiplier absorbs the error). A standing sender: the copy stands
+        // once it is within the stop distance (and stays standing up to the start distance), else walks there.
+        const int h = std::min<int>(in.gaitHint, 3);
+        if (h == 0) {
+            const float keep = gait_ == Gait::Stand ? t_.startDist : t_.stopDist;
+            g = err <= keep ? Gait::Stand : Gait::Walk;
+        } else {
+            g = static_cast<Gait>(h);
+        }
+    } else if (g == Gait::Stand) {
+        // Unknown gait: chosen from the wanted speed, with hysteresis.
         if (tspeed >= t_.standSpeed || err > t_.startDist) g = Gait::Walk;
     } else if (tspeed < t_.standSpeed && err < t_.stopDist) {
         g = Gait::Stand;
     }
-    if (g != Gait::Stand) {
+    if (g != Gait::Stand && in.gaitHint < 0) {
         if (g == Gait::Walk && want > t_.walkToRun) g = Gait::Run;
         if (g == Gait::Run && want < t_.runToWalk) g = Gait::Walk;
         const bool sprintWanted = want > t_.runToSprint || (in.sprint && want > t_.sprintHintSpeed);
@@ -183,6 +240,9 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
 
     float mult = 1;
     if (g != Gait::Stand) mult = std::clamp(want / std::max(base_[GaitIndex(g)], 0.1f), t_.minMult, t_.maxMult);
+    // His game says he stands but the copy is not there yet: it walks there at a normal pace (not creeping in at the
+    // speed of the shrinking error).
+    if (in.gaitHint == 0 && g == Gait::Walk) mult = std::max(mult, 1.0f);
     if (g != gait_ || std::fabs(mult - mult_) > 0.05f) sinceChange_ = 0;
     c.want = want;
     // The fastest multiplier still too slow (the game's AI sprint is slower than a player's): carry the shortfall
@@ -195,7 +255,9 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         float reach = base_[GaitIndex(g)] * mult;
         if (lastMeasured_ >= 0 && g == gait_) reach = std::min(reach, lastMeasured_ / measuredMult_ * mult);
         const float deficit = want - reach;
-        if (deficit > t_.carryMin) {
+        // only while the copy is behind (a copy on or ahead of its target has nothing to make up)
+        const float behind = (ex * wx + ey * wy) / want;
+        if (deficit > t_.carryMin && behind > 0.1f) {
             const float k = deficit * dt / want;
             c.nudge.x += wx * k;
             c.nudge.y += wy * k;
@@ -204,6 +266,20 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
             lastNudge_ = c.nudge;
         }
     }
+
+    // A target braking to a stop (his game no longer says run / sprint): walk to where he will stand - the game's walk
+    // to a point arrives there - instead of a point ahead, so the copy does not overshoot by its response lag.
+    bool stopping = false;
+    Vec3 stopAt;
+    if (tspeed > 0.1f && in.gaitHint <= 1) {
+        const float apar = (tAcc_[0] * in.targetVel.x + tAcc_[1] * in.targetVel.y) / tspeed;
+        if (apar < -t_.brakeAccel && tspeed / -apar < t_.brakeHorizon) {
+            const float d = tspeed * tspeed / (2 * -apar);
+            stopAt = {in.target.x + in.targetVel.x / tspeed * d, in.target.y + in.targetVel.y / tspeed * d, in.target.z};
+            stopping = true;
+        }
+    }
+    c.stopping = stopping;
 
     // Walk point and when to re-aim.
     bool reissue = false;
@@ -214,10 +290,13 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         const float dirx = want > 1e-3f ? wx / want : in.heading[0], diry = want > 1e-3f ? wy / want : in.heading[1];
         const float ahead = std::max(t_.lookMin, want * t_.lookAhead);
         // Approaching a standing player: walk to his spot (a point beyond it would overshoot and turn back).
-        c.moveTo = tspeed < t_.standSpeed ? in.target
-                                          : Vec3{in.copy.x + dirx * ahead, in.copy.y + diry * ahead, in.target.z};
+        // (Not when his game says he moves: at a start his speed is still low, and a walk to the copy's own spot
+        // would end at once.)
+        c.moveTo = stopping                                       ? stopAt
+                   : tspeed < t_.standSpeed && in.gaitHint <= 0 ? in.target
+                                                                : Vec3{in.copy.x + dirx * ahead, in.copy.y + diry * ahead, in.target.z};
         const float dot = issueDir_[0] * dirx + issueDir_[1] * diry;
-        if (!issued_ || g != gait_ || dot < std::cos(t_.reissueAngleDeg * kPi / 180) ||
+        if (!issued_ || g != gait_ || stopping != stopping_ || dot < std::cos(t_.reissueAngleDeg * kPi / 180) ||
             sinceIssue_ >= t_.reissueInterval || c.fix == LocomotionCommand::Fix::Snap) {
             reissue = true;
             issueDir_[0] = dirx;
@@ -229,6 +308,7 @@ LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
         sinceIssue_ = 0;
     }
     if (g != gait_) sinceGait_ = 0;
+    stopping_ = stopping;
     gait_ = g;
     mult_ = mult;
     c.gait = g;
@@ -259,6 +339,8 @@ void VehicleController::Reset() {
     pinned_ = false;
     slowT_ = lagT_ = 0;
     pinnedT_ = retryAfter_ = 0;
+    freeT_ = 0;
+    level_ = 0;
     why_ = VehicleCommand::Why::None;
     pins_ = retries_ = 0;
 }
@@ -289,6 +371,11 @@ VehicleCommand VehicleController::Update(const VehicleInput& in) {
     for (int i = 0; i < 4; ++i) dot += in.copyRot[i] * in.targetRot[i];
     c.rotErrDeg = 2 * std::acos(std::min(1.0f, std::fabs(dot))) * 180 / kPi;
 
+    // A copy that kept up unpinned for retryReset: the next pin starts the doubling again.
+    if (!pinned_) {
+        freeT_ += dt;
+        if (freeT_ >= t_.retryReset) level_ = 0;
+    }
     // A pinned copy gets its physics back after a while (what kept it from moving may be gone).
     if (pinned_) {
         pinnedT_ += dt;
@@ -296,6 +383,7 @@ VehicleCommand VehicleController::Update(const VehicleInput& in) {
             pinned_ = false;
             slowT_ = lagT_ = 0;
             c.retried = true;
+            freeT_ = 0;
             ++retries_;
         }
     }
@@ -316,13 +404,18 @@ VehicleCommand VehicleController::Update(const VehicleInput& in) {
             pinned_ = true;
             why_ = why;
             pinnedT_ = 0;
-            retryAfter_ = pins_ == 0 ? t_.retryFirst : std::min(t_.retryMax, retryAfter_ * 2);
+            retryAfter_ = level_ == 0 ? t_.retryFirst : std::min(t_.retryMax, retryAfter_ * 2);
+            ++level_;
             ++pins_;
             c.justPinned = true;
         }
     }
     c.pinned = pinned_;
     c.why = why_;
+    if (pinned_) {
+        c.pinnedFor = pinnedT_;
+        c.retryIn = std::max(0.0f, retryAfter_ - pinnedT_);
+    }
     // Wanted velocity: the target's plus a bounded share of the error (pinned or snapped: the target's).
     if (!pinned_ && !in.teleported && err <= t_.snapDist) {
         float vx = ex * t_.velGain, vy = ey * t_.velGain, vz = ez * t_.velGain;
