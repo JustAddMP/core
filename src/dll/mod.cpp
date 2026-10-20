@@ -6,6 +6,7 @@
 #include "core/log.h"
 #include "dll/coop.h"
 #include "dll/coop_ui.h"
+#include "dll/session_log.h"
 #include "dll/test_input.h"
 #include "dll/window_place.h"
 #include "mc/game_module.h"
@@ -59,8 +60,10 @@ void OnProcessExit(const char* via) {
     std::unique_lock<std::recursive_timed_mutex> lock(_tickMutex, std::defer_lock);
     const bool locked = lock.try_lock_for(std::chrono::milliseconds(500));
     _exiting = true;
+    SessionLog::CloseForExit(via, locked);  // an open session's summary and trace end; its bundle is queued
     Coop::Shutdown();
     if (locked) render::Overlay::ReleaseAll();  // only without a frame drawing at the same time
+    SessionLog::WaitForBundles();           // the bundle is written before the process goes (bounded)
     MC_LOG_INFO("mod: exit handling done%s", locked ? "" : " (render thread busy: overlay left to the OS)");
 }
 
@@ -119,6 +122,7 @@ void Mod::Init() {
                 _state.overlayVisible ? "shown" : "hidden");
     Coop::Init();
     CoopUi::Init();
+    SessionLog::Init();  // trace close hooks, a bundle for a session the last run did not end (dll/session_log.h)
     InstallExitHooks();
     MC_LOG_INFO("mod: initialized");
 }

@@ -1,7 +1,8 @@
-// core_trace: the sync trace (src/core/trace.h) and the log runs kept (src/core/log.h). In a temp folder: a trace is
-// created next to the log with its header, records and a copy of every log line, lines from several threads are
-// whole, Close() flushes, only the newest kKeepFiles traces stay, and five previous logs are kept. Exits non-zero
-// on any failure.
+// core_trace: the sync trace (src/core/trace.h) and the log (src/core/log.h). In a temp folder: a trace is created
+// next to the log with its header, records and a copy of every log line, lines from several threads are whole,
+// Close() flushes and runs its hooks (the before hook's lines are in the file), only the newest kKeepFiles traces
+// stay and a folder byte cap prunes the oldest; ten previous logs are kept; warnings / errors of one call site are
+// rate limited (a burst, then a "repeated N more times" line) and counted. Exits non-zero on any failure.
 #include <windows.h>
 
 #include <cstdio>
@@ -78,16 +79,51 @@ int main() {
     RemoveTree(dir);
     CreateDirectoryW(dir.c_str(), nullptr);
 
-    // log runs: six inits leave the current log and five previous ones
-    for (int i = 0; i < 7; ++i) {
+    // log runs: twelve inits leave the current log and ten previous ones
+    const int keep = mc::core::log::kKeepRuns;
+    for (int i = 0; i < keep + 2; ++i) {
         mc::core::log::Init(dir, L"t.log");
         MC_LOG_INFO("run %d", i);
         mc::core::log::Shutdown();
     }
-    Check(CountFiles(dir + L"\\t.log*") == 6, "log: the current run and five previous ones are kept",
+    Check(keep == 10 && CountFiles(dir + L"\\t.log*") == keep + 1, "log: the current run and ten previous ones are kept",
           std::to_string(CountFiles(dir + L"\\t.log*")) + " files");
-    Check(ReadAll(dir + L"\\t.log.1").find("run 5") != std::string::npos, "log: .1 is the previous run");
-    Check(ReadAll(dir + L"\\t.log.5").find("run 1") != std::string::npos, "log: .5 is the oldest kept");
+    Check(ReadAll(dir + L"\\t.log.1").find("run " + std::to_string(keep)) != std::string::npos,
+          "log: .1 is the previous run");
+    Check(ReadAll(dir + L"\\t.log.10").find("run 1") != std::string::npos, "log: .10 is the oldest kept");
+
+    // the repeat limiter (pure): 10 per 60 s window, the rest counted and reported when the next window starts
+    {
+        mc::core::log::RepeatState rs;
+        uint64_t rep = 0;
+        int allowed = 0;
+        for (int i = 0; i < 25; ++i) allowed += mc::core::log::RepeatAllow(rs, 100.0 + i, &rep) ? 1 : 0;
+        Check(allowed == 10 && rs.pending == 15, "repeats: the first 10 in a window, 15 counted");
+        Check(mc::core::log::RepeatExpired(rs, 130.0) == 0, "repeats: nothing reported while the window runs");
+        const bool next = mc::core::log::RepeatAllow(rs, 161.0, &rep);
+        Check(next && rep == 15 && rs.pending == 0, "repeats: the next window reports the 15 and writes again");
+        for (int i = 0; i < 12; ++i) mc::core::log::RepeatAllow(rs, 162.0 + i, &rep);
+        Check(mc::core::log::RepeatExpired(rs, 230.0) == 3 && rs.pending == 0, "repeats: an expired window reports");
+    }
+    // the same in a real log: one call site 30 times, another twice
+    mc::core::log::Init(dir, L"r.log");
+    const auto s0 = mc::core::log::GetStats(100);
+    for (int i = 0; i < 30; ++i) MC_LOG_WARN("spam warning %d", i);
+    MC_LOG_ERROR("other error %d", 1);
+    MC_LOG_ERROR("other error %d", 2);
+    const auto s1 = mc::core::log::GetStats(100);
+    const std::string rlog = ReadAll(dir + L"\\r.log");
+    Check(CountLines(rlog, "spam warning") == 10 && rlog.find("spam warning 9") != std::string::npos &&
+              rlog.find("spam warning 10") == std::string::npos,
+          "repeats: a site's lines after the first 10 are not written", std::to_string(CountLines(rlog, "spam warning")));
+    Check(CountLines(rlog, "other error") == 2, "repeats: another site is not affected");
+    Check(s1.asked[2] - s0.asked[2] == 30 && s1.asked[3] - s0.asked[3] == 2 && s1.suppressed - s0.suppressed == 20,
+          "stats: warnings and errors asked for, lines suppressed");
+    const bool topOk = !s1.sites.empty() && s1.sites[0].fmt == "spam warning %d" && s1.sites[0].suppressed >= 20;
+    Check(topOk, "stats: the most frequent site first, with its suppressed count");
+    mc::core::log::FlushRepeats();  // within the window: nothing yet
+    Check(ReadAll(dir + L"\\r.log").find("repeated") == std::string::npos, "repeats: no report inside the window");
+    mc::core::log::Shutdown();
 
     mc::core::log::Init(dir, L"t.log");
     Check(mc::core::log::BaseName() == L"t" && mc::core::log::Dir() == dir, "log: Dir() and BaseName()");
@@ -122,6 +158,49 @@ int main() {
     const int whole = CountLines(text, " end");
     Check(whole == 2000 && CountLines(text, " MT ") == 2000, "trace: 2000 lines from 4 threads, all whole",
           std::to_string(whole));
+
+    // close hooks: before (the file still open: its line goes in), after (closed, with the path)
+    {
+        static std::wstring beforePath, afterPath;
+        static bool afterSawOpen = true;
+        mc::core::trace::SetCloseHooks(
+            [](const std::wstring& p) {
+                beforePath = p;
+                mc::core::trace::Line("FIN", "part=test");
+            },
+            [](const std::wstring& p) {
+                afterPath = p;
+                afterSawOpen = mc::core::trace::IsOpen();
+            });
+        mc::core::trace::Open("hooks", "h");
+        const std::wstring hp = mc::core::trace::Path();
+        mc::core::trace::Close();
+        mc::core::trace::SetCloseHooks(nullptr, nullptr);
+        Check(beforePath == hp && afterPath == hp && !afterSawOpen, "trace: close hooks before and after, with the path");
+        Check(ReadAll(hp).find(" FIN part=test") != std::string::npos, "trace: the before hook's line is in the file");
+    }
+
+    // the folder's byte cap: PruneFolder keeps the newest that fit
+    {
+        const std::wstring pd = dir + L"\\prune";
+        CreateDirectoryW(pd.c_str(), nullptr);
+        for (int i = 0; i < 6; ++i) {
+            std::ofstream f(pd + L"\\f" + std::to_wstring(i) + L".trace", std::ios::binary);
+            f << std::string(1000, 'x');
+            f.close();
+            HANDLE h = CreateFileW((pd + L"\\f" + std::to_wstring(i) + L".trace").c_str(), FILE_WRITE_ATTRIBUTES, 0,
+                                   nullptr, OPEN_EXISTING, 0, nullptr);
+            FILETIME ft{static_cast<DWORD>(1000000 * (i + 1)), 0x01D00000};
+            SetFileTime(h, nullptr, nullptr, &ft);
+            CloseHandle(h);
+        }
+        const int gone = mc::core::trace::PruneFolder(pd, L"*.trace", 10, 3500);
+        Check(gone == 3 && CountFiles(pd + L"\\*.trace") == 3 && CountFiles(pd + L"\\f5.trace") == 1 &&
+                  CountFiles(pd + L"\\f0.trace") == 0,
+              "trace: a byte cap removes the oldest", std::to_string(gone));
+        Check(mc::core::trace::kMaxBytes == (1ull << 30) && mc::core::trace::kMaxFolderBytes == (4ull << 30),
+              "trace: 1 GiB per file, 4 GiB per folder");
+    }
 
     // pruning: after many sessions only the newest kKeepFiles remain
     for (int i = 0; i < mc::core::trace::kKeepFiles + 5; ++i) {

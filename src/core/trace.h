@@ -10,7 +10,9 @@
 // the main log is copied into it too ("<t> <date time> [thread] LVL text"), so one file tells the whole story.
 //
 // Buffered (written about twice a second and when the buffer fills, never per line); thread-safe. A file stops
-// growing at kMaxBytes (one last line says so).
+// growing at kMaxBytes (one last line says so). The folder is bounded too: before a new trace opens, the oldest go
+// until at most kKeepFiles - 1 remain and they take at most kMaxFolderBytes - kMaxBytes (so the folder never holds
+// more than kMaxFolderBytes).
 #include <cstdarg>
 #include <cstddef>
 #include <string>
@@ -18,7 +20,8 @@
 namespace mc::core::trace {
 
 constexpr int kKeepFiles = 20;
-constexpr unsigned long long kMaxBytes = 1536ull << 20;  // 1.5 GiB per session
+constexpr unsigned long long kMaxBytes = 1ull << 30;         // 1 GiB per session (about four hours)
+constexpr unsigned long long kMaxFolderBytes = 4ull << 30;   // 4 GiB for the whole trace folder
 
 // Opens a new trace file next to the main log (core/log.h must be open) and writes a header line
 // "<t> H trace=1 wall=<local date time> qpc=<t> pid=<pid> <header>". Closes the previous one first. tag: appended to
@@ -38,5 +41,15 @@ void LineAt(double t, const char* type, const char* fmt, ...);
 // A finished line without the time ("<t> " is prepended; trailing CR/LF dropped); used for the copy of the main log.
 void Raw(const char* text, size_t len);
 void Flush();
+
+// Hooks around Close() (also the Close inside Open): `before` runs while the file is still open (its last records:
+// a session summary), `after` once it is closed, with its path (a session bundle). Either may be null. Called on the
+// closing thread, outside the trace lock.
+using CloseHook = void (*)(const std::wstring& path);
+void SetCloseHooks(CloseHook before, CloseHook after);
+
+// Deletes the oldest files matching dir\<pattern> until at most keepFiles remain and they take at most keepBytes
+// (keepFiles < 0 / keepBytes = 0: no limit of that kind). Returns how many went. (Traces, bundles; tests.)
+int PruneFolder(const std::wstring& dir, const wchar_t* pattern, int keepFiles, unsigned long long keepBytes);
 
 }  // namespace mc::core::trace

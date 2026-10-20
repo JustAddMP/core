@@ -20,6 +20,7 @@ std::string _buf;
 double _lastFlush = 0;
 unsigned long long _written = 0;
 bool _full = false;
+CloseHook _beforeClose = nullptr, _afterClose = nullptr;
 constexpr size_t kFlushBytes = 256 * 1024;
 constexpr double kFlushInterval = 0.5;
 
@@ -51,24 +52,6 @@ void AppendLocked(const char* line, size_t len, double now) {
     }
 }
 
-// Deletes the oldest *.trace files in dir so that at most keep - 1 remain (one is about to be created).
-void Prune(const std::wstring& dir, int keep) {
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*.trace").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    std::vector<std::pair<unsigned long long, std::wstring>> files;
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        const unsigned long long t = (static_cast<unsigned long long>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
-                                     fd.ftLastWriteTime.dwLowDateTime;
-        files.push_back({t, fd.cFileName});
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-    if (static_cast<int>(files.size()) < keep) return;
-    std::sort(files.begin(), files.end());
-    for (size_t i = 0; i + keep - 1 < files.size(); ++i) DeleteFileW((dir + L"\\" + files[i].second).c_str());
-}
-
 int Format(char* buf, int cap, double t, const char* type, const char* fmt, va_list args) {
     int n = std::snprintf(buf, static_cast<size_t>(cap), "%.4f %s ", t, type);
     if (n < 0 || n >= cap - 2) return 0;
@@ -80,6 +63,46 @@ int Format(char* buf, int cap, double t, const char* type, const char* fmt, va_l
 }
 
 }  // namespace
+
+int PruneFolder(const std::wstring& dir, const wchar_t* pattern, int keepFiles, unsigned long long keepBytes) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\" + pattern).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    struct File {
+        unsigned long long time, size;
+        std::wstring name;
+    };
+    std::vector<File> files;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const unsigned long long t = (static_cast<unsigned long long>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                                     fd.ftLastWriteTime.dwLowDateTime;
+        const unsigned long long n = (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        files.push_back({t, n, fd.cFileName});
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.time > b.time; });  // newest first
+    int removed = 0;
+    unsigned long long kept = 0;
+    bool full = false;  // from the first file that does not fit on, the older ones go too
+    for (size_t i = 0; i < files.size(); ++i) {
+        full = full || (keepFiles >= 0 && static_cast<int>(i) >= keepFiles) ||
+               (keepBytes > 0 && kept + files[i].size > keepBytes);
+        if (full) {
+            if (DeleteFileW((dir + L"\\" + files[i].name).c_str())) ++removed;
+        } else {
+            kept += files[i].size;
+        }
+    }
+    return removed;
+}
+
+void SetCloseHooks(CloseHook before, CloseHook after) {
+    AcquireSRWLockExclusive(&_lock);
+    _beforeClose = before;
+    _afterClose = after;
+    ReleaseSRWLockExclusive(&_lock);
+}
 
 double Now() {
     static const double freq = [] {
@@ -98,7 +121,7 @@ bool Open(const std::string& header, const char* tag) {
     if (logDir.empty()) return false;
     const std::wstring dir = logDir + L"\\trace";
     CreateDirectoryW(dir.c_str(), nullptr);
-    Prune(dir, kKeepFiles);
+    PruneFolder(dir, L"*.trace", kKeepFiles - 1, kMaxFolderBytes - kMaxBytes);
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t stamp[32];
@@ -132,14 +155,24 @@ bool Open(const std::string& header, const char* tag) {
 }
 
 void Close() {
+    AcquireSRWLockShared(&_lock);
+    const bool open = _file != INVALID_HANDLE_VALUE;
+    const CloseHook before = _beforeClose, after = _afterClose;
+    const std::wstring path = _path;
+    ReleaseSRWLockShared(&_lock);
+    if (!open) return;
+    if (before) before(path);  // its last records go in while the file is open
+    bool closed = false;
     AcquireSRWLockExclusive(&_lock);
-    if (_file != INVALID_HANDLE_VALUE) {
+    if (_file != INVALID_HANDLE_VALUE && _path == path) {
         FlushLocked();
         CloseHandle(_file);
         _file = INVALID_HANDLE_VALUE;
         _path.clear();
+        closed = true;
     }
     ReleaseSRWLockExclusive(&_lock);
+    if (closed && after) after(path);
 }
 
 bool IsOpen() {

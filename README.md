@@ -55,7 +55,15 @@ out\net_motion.exe           remote motion controllers (locomotion against a sim
 out\net_latency.exe          latency: adaptive playout delay under jitter/loss/drift, send -> receive delay with and
                              without Flush, fast retransmit under loss, lanes vs head-of-line blocking, session clock
 out\core_trace.exe           sync trace (file next to the log, header, log copy, whole lines from 4 threads, only
-                             the newest kept) and the five previous logs kept
+                             the newest kept, the folder's byte cap, close hooks), ten previous logs kept, warnings /
+                             errors rate limited per call site with "repeated N more times" and counted
+out\zip_writer.exe           CRC-32, the streaming deflate and the zip container, checked with an inflate of its own
+                             (zip_writer.exe <out.zip> <files> measures speed and ratio)
+out\session_diag.exe         core/diag.h counters and levels, bundle helpers (password redaction, names, recovery
+                             choice) and a real bundle written on the worker (session_diag.exe <out.zip> <trace>
+                             [<log> [<ini>]] bundles real files)
+out\session_log.exe          the session diagnostics end to end over UDP: recovery bundle, SES / SCK / SUM / FIN
+                             records, the session bundle (about 12 s)
 out\net_fuzz.exe             malformed packets against session and UDP transport
 out\pending_join.exe         Steam join requests are handed to the next tick, never acted on mid-poll
 out\steam_friends.exe        JOIN FRIEND list against a fake Steam (hosting / guest / not hosting / version / full)

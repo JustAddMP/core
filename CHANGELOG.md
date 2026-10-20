@@ -3,6 +3,41 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## Unreleased
+
+Session diagnostics for two-PC tests: everything about a co-op session in the main log, the sync trace and one zip per
+session, so a problem can be diagnosed from the two players' files alone. New features, additive: game repos keep
+building without changes. The wire protocol stays 9 (no new messages). **Not checked in a game yet**; unit and
+end-to-end tests over UDP without a game.
+
+- `dll/session_log.h` (driven from `Coop::Tick`): while a session's trace is open, a `session: ---- session start`
+  block in the log and `SES` records (versions, handshake build, protocol, the exe's CRC-32 read on a background
+  thread and the `GameInfo` build it matches, role, local player and Steam account, transport, port, LAN address and
+  Steam lobby, every setting with password-like values redacted, window / backbuffer / fullscreen / monitor / DPI,
+  OS, RAM, fps, the log / trace / bundle paths, every peer with its Steam id and address, later joiners too); `SCK`
+  every 5 s (trace time vs the session clock, offset and its uncertainty, rtt); `SUM` every 10 s (per peer rtt, loss,
+  KB/s and packets in / out, resends, queue; KB/s per reliable lane; fps and the lowest frame; warnings / errors; the
+  game's numbers) and a `session: summary` log line every 60 s; at the end `FIN` records and a `session: ---- session
+  end` block (duration, peers, totals per peer and lane, the busiest messages, worst latency and loss, the game's
+  totals, warnings / errors with the five most repeated call sites, the bundle's path).
+- `core/diag.h`: named levels and counts a game layer publishes for those summaries (`Set`, `Total` for a running
+  count it keeps, `Add`); per-window deltas, formatting into lines, at most 512 names.
+- `core/bundle.h`, `core/zip_writer.h`: at the end of each session (and at a game exit with one open; the exit waits
+  for it, at most 20 s) `logs\bundles\<mod>-<yyyymmdd>-<hhmmss>-<role>.zip` with the session's trace, the main log,
+  the settings file (passwords redacted), the launcher logs of the last 24 h, the crash dumps written since the
+  session started and a manifest.txt; written on a worker thread to `.tmp` and renamed when complete; the newest 30
+  kept. At start the newest trace of this log without a bundle (crash, kill) gets a `-recovered` bundle with the
+  previous log. Deflate of our own (LZ77 with hash chains, dynamic Huffman blocks), CRC-32 and the zip container
+  without zip64 (an entry stops at 2 GiB with a note); about 165-200 MB/s and 7-9x on real traces.
+- `core/log.h`: ten previous logs kept per log name (was five); warnings and errors rate limited per call site (the
+  format string): 10 per 60 s, then `repeated N more times in 60 s (rate limited; last: ...)`; per-level and per-site
+  totals (`GetStats`), `FlushRepeats` (every 10 s), `Path()`.
+- `core/trace.h`: one file stops at 1 GiB (was 1.5 GiB), and the folder is capped at 4 GiB in all (the oldest go
+  first; still at most 20 files); `SetCloseHooks` (before / after a trace closes), `PruneFolder`.
+- `dll/window_place.h`: `Window()` (the game window, for the header). `mod.cpp`: the exit hook closes an open session's
+  trace with its summary before leaving the session and waits for its bundle afterwards.
+- Tests: `zip_writer`, `session_diag`, `session_log` (new), `core_trace` (log runs, repeats, close hooks, byte cap).
+
 ## v0.13.0 — 2026-10-20
 
 An update check: once per game start the mod asks justaddmp.com whether a newer release of it is out and, if so,

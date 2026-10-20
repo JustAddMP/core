@@ -4,6 +4,7 @@
 #include "core/config.h"
 #include "core/log.h"
 #include "dll/pending_join.h"
+#include "dll/session_log.h"
 #include "mc/game_module.h"
 #include "net/lobby.h"
 #include "net/multi_transport.h"
@@ -258,6 +259,7 @@ void Teardown() {
     s.gameLobby.Detach();
     if (s.session) s.session->Leave();
     s.session.reset();
+    SessionLog::SetSession(nullptr);
     s.net.reset();
     s.target.clear();
     if (s.steam == SteamState::Ready && s.lobby.GetState() != net::SteamLobby::State::Idle) s.lobby.Leave();
@@ -335,6 +337,7 @@ void MakeSession(std::unique_ptr<net::Transport> transport) {
     s.overlayMon.Reset();
     s.logMon.nameOf = s.overlayMon.nameOf = &MsgName;
     s.session = std::make_unique<net::Session>(*s.net, cfg);
+    SessionLog::SetSession(s.session.get());
     net::Session& session = *s.session;
     GetGameModule().OnSessionStart(session);
     s.gameLobby.Attach(session);
@@ -491,6 +494,7 @@ void HandleJoinRequest() {
         GetGameModule().OnSessionEnd();
         s.session->Leave();
         s.session.reset();
+        SessionLog::SetSession(nullptr);
         s.net.reset();
     }
     s.teardown = false;  // the old session is gone; a teardown it requested must not end the new join
@@ -651,6 +655,27 @@ void TryStart() {
     s.started = true;
 }
 
+// What the session header (dll/session_log.h) says about the connection.
+SessionContext ContextNow() {
+    State& s = S();
+    SessionContext c;
+    c.build = BuildNumber();
+    c.mode = ModeName(s.mode);
+    c.transport = s.net ? s.net->Name() : "";
+    c.target = s.mode == Mode::Host ? "" : (s.hostName.empty() ? s.target : s.hostName);
+    c.udpPort = s.mode == Mode::Host && s.transport != "steam" ? s.port : 0;
+    c.lanAddress = s.localAddress;
+    c.steamReady = s.steam == SteamState::Ready;
+    c.steamId = s.steamId;
+    c.persona = s.persona;
+    c.lobbyId = s.steam == SteamState::Ready && s.lobby.GetState() == net::SteamLobby::State::InLobby
+                    ? s.lobby.LobbyId()
+                    : (s.mode == Mode::JoinLobby ? s.lobbyId : 0);
+    c.relayKBs = BudgetBytesPerS() / 1024.0;
+    c.password = s.mode == Mode::Host ? !s.password.empty() : !s.joinPassword.empty();
+    return c;
+}
+
 std::string Ms(float ms) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%d ms", static_cast<int>(ms + 0.5f));
@@ -663,6 +688,7 @@ void Coop::Init() {
     State& s = S();
     const auto& cfg = core::Config::Get();
     net::SetLogSink(&NetLog);
+    SessionLog::SetContextSource(&ContextNow);
 
     s.name = cfg.GetString("name");
     s.transport = Lower(cfg.GetString("transport"));
@@ -739,6 +765,7 @@ void Coop::Tick(float dt) {
         s.overlayMon.Sample(*s.session, s.now, 1.0);
     }
     if (s.teardown) Teardown();
+    SessionLog::Tick(dt);  // session header, summaries, clock samples (dll/session_log.h)
 }
 
 double Coop::NetBudgetBytesPerS() { return BudgetBytesPerS(); }

@@ -80,4 +80,6 @@ void OnResize() {
     _nextCheck = _now + 0.2f;
 }
 
+void* Window() { return _hwnd; }
+
 }  // namespace mc::window_place

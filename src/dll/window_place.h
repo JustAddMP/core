@@ -9,5 +9,6 @@ namespace mc::window_place {
 void Init(void* hwnd);  // reads the config; once, after the game window exists
 void Tick(float dt);    // render thread, every frame
 void OnResize();        // after IDXGISwapChain::ResizeBuffers
+void* Window();         // the game window given to Init (nullptr before it); for the session summary
 
 }  // namespace mc::window_place
