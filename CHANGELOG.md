@@ -3,12 +3,13 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
-## Unreleased
+## v0.14.0 — 2026-10-20
 
 Session diagnostics for two-PC tests: everything about a co-op session in the main log, the sync trace and one zip per
 session, so a problem can be diagnosed from the two players' files alone. New features, additive: game repos keep
-building without changes. The wire protocol stays 9 (no new messages). **Not checked in a game yet**; unit and
-end-to-end tests over UDP without a game.
+building without changes. The wire protocol stays 9 (no new messages). Checked in game on one PC with MafiaCoop
+0.17.0 (two instances over UDP: the start block, summaries, clock samples, end totals, the bundle at each game exit
+and a -recovered one after a killed game); not yet between two PCs or over Steam. Unit and end-to-end tests over UDP.
 
 - `dll/session_log.h` (driven from `Coop::Tick`): while a session's trace is open, a `session: ---- session start`
   block in the log and `SES` records (versions, handshake build, protocol, the exe's CRC-32 read on a background
@@ -36,6 +37,9 @@ end-to-end tests over UDP without a game.
   first; still at most 20 files); `SetCloseHooks` (before / after a trace closes), `PruneFolder`.
 - `dll/window_place.h`: `Window()` (the game window, for the header). `mod.cpp`: the exit hook closes an open session's
   trace with its summary before leaving the session and waits for its bundle afterwards.
+- `net/remote_motion.h` `LocomotionController::Applied`: a game layer that fixes a position itself tells the
+  controller the nudge really applied, so the walk measurement (calibration) and the copy's walking velocity leave
+  it out (the on-foot velocity matching of MafiaCoop 0.17.0); test `net_motion` TestApplied.
 - Tests: `zip_writer`, `session_diag`, `session_log` (new), `core_trace` (log runs, repeats, close hooks, byte cap).
 
 ## v0.13.0 — 2026-10-20
