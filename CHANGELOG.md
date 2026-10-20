@@ -3,6 +3,26 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## v0.13.0 — 2026-10-20
+
+An update check: once per game start the mod asks justaddmp.com whether a newer release of it is out and, if so,
+tells the player at the main menu. New features, additive: game repos keep building without changes (the new
+`GameInfo::updateId` defaults to no check). The wire protocol version stays 9. **Not checked in a game yet**; the
+check itself ran against the live endpoint from a test harness.
+
+- `core/update_check.h`: `GET https://justaddmp.com/api/version/<GameInfo::updateId>` on a thread of its own (WinHTTP,
+  5 s per step), once per game start, from the overlay's first frame. When the answer's `latest` is newer than
+  `modVersion`, a banner like the join/leave ones ("UPDATE AVAILABLE: MafiaCoop v0.16.0 is out (you have v0.15.0).
+  Get it at justaddmp.com") shows for 20 s once the main menu is up (`GameModule::LobbyCanOpen` and not `InWorld`),
+  and CO-OP SETTINGS keeps a line "UPDATE AVAILABLE: V0.16.0 AT JUSTADDMP.COM". Offline, a timeout or an odd answer
+  only write a log line; nothing waits for the check.
+- Versions: optional `v`, one to three numbers, pre-releases (`-beta.2`, ordered as in semver, below the release)
+  and ignored build suffixes (`+5`); anything else is not compared.
+- Testing: `--update-as <version>` (dll: `<envPrefix>UPDATE_AS`) checks as if the mod were that version;
+  `--update-url <url>` asks another server.
+- `core_version.h`: `kCoreVersionMinor` said 11 in v0.12.0; now 13 with `kCoreVersion` "0.13.0".
+- Tests: `update_check` (new).
+
 ## v0.12.0 â€” 2026-10-20
 
 One replication layer for every kind of copy a game layer shows (docs/replication.md). New features, additive: game
