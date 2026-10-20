@@ -123,6 +123,10 @@ public:
     explicit LocomotionController(const LocomotionTuning& t = {});
     LocomotionCommand Update(const LocomotionInput& in);
     void Reset();  // copy respawned / hidden: forget the measurement window and the walk state (keeps calibration)
+    // The caller moved the copy by another nudge than this update's command (a game layer with its own position fix):
+    // the walk measurement and the copy's walking velocity leave out what was really applied. Call after Update, with
+    // the nudge applied this update ({} for none; after a snap it changes nothing).
+    void Applied(const Vec3& nudge);
     float BaseSpeed(Gait g) const;  // calibrated nominal speed of a gait (m/s)
     Gait CurrentGait() const { return gait_; }
     float CurrentMult() const { return mult_; }

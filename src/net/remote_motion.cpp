@@ -76,6 +76,10 @@ void LocomotionController::Reset() {
     lastMeasured_ = -1;
 }
 
+void LocomotionController::Applied(const Vec3& nudge) {
+    if (haveLast_) lastNudge_ = nudge;
+}
+
 LocomotionCommand LocomotionController::Update(const LocomotionInput& in) {
     LocomotionCommand c;
     const float dt = std::clamp(in.dt, 0.0f, 0.5f);

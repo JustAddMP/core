@@ -244,6 +244,31 @@ void TestLocomotion() {
     Check(c.fix == LocomotionCommand::Fix::None && !c.reissue, "no copy known: no fix, no walk");
 }
 
+// A game layer with its own position fix (Applied): the walk measurement leaves out the nudge really applied, not
+// the one the controller asked for. The copy walks 2 m/s by itself and is nudged another 1 m/s by the caller.
+void TestApplied() {
+    LocomotionController ctl;
+    const float dt = 1.0f / 120;
+    float x = 0;
+    float measured = -1;
+    for (int i = 0; i < 600; ++i) {
+        LocomotionInput in;
+        in.target = {x + 0.4f, 0, 0};
+        in.targetVel = {3, 0, 0};
+        in.gaitHint = 2;
+        in.haveCopy = true;
+        in.copy = {x, 0, 0};
+        in.dt = i ? dt : 0.0f;
+        const LocomotionCommand c = ctl.Update(in);
+        measured = c.measured;
+        const Vec3 mine{1.0f * dt, 0, 0};  // the caller's nudge, instead of the controller's
+        ctl.Applied(mine);
+        x += 2.0f * dt + mine.x;
+    }
+    Check(std::fabs(measured - 2.0f) < 0.1f, "Applied: walk measured without the caller's nudge",
+          Fmt("%.2f m/s (walks 2.00, moved 3.00)", measured));
+}
+
 // A car copy: its physics either keeps the velocity it had (and the governed throttle tops it up toward the target
 // speed), or every teleport zeroes it.
 // The game's AI sprint is much slower than a player's (Mafia DE: ~3.3 m/s against ~6 m/s): the copy keeps up by
@@ -704,6 +729,7 @@ int main() {
     TestVehicleRules();
     TestGaitHint();
     TestPinPolicy();
+    TestApplied();
     std::printf("%s (%d failure%s)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures, g_failures == 1 ? "" : "s");
     return g_failures ? 1 : 0;
 }
