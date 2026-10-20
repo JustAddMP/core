@@ -2,6 +2,8 @@
 
 #include "core/compat.h"
 #include "core/log.h"
+#include "core/names.h"
+#include "core/update_check.h"
 #include "dll/coop.h"
 #include "dll/mod.h"
 #include "dll/ui_input.h"
@@ -34,6 +36,7 @@ constexpr uint32_t kToastBg = 0xE0100E0C;
 
 constexpr float kToastSeconds = 5.0f;
 constexpr float kCompatToastSeconds = 45.0f;
+constexpr float kUpdateToastSeconds = 20.0f;  // long enough to read at the main menu
 constexpr float kFade = 0.25f;
 
 struct Toast {
@@ -92,6 +95,10 @@ struct UiState {
     Coop::Info info;
     float mouseX = -1, mouseY = -1;
     bool compatChecked = false;
+    // update check (core/update_check.h): started on the first frame, its notice shown once at the main menu
+    bool updateStarted = false, updateDone = false;
+    std::string updateCurrent;  // the version checked as (modVersion, or <envPrefix>UPDATE_AS)
+    std::string updateLatest;   // the newer release, once known ("" = none): also shown in CO-OP SETTINGS
     uint32_t starts = 0;  // Coop::Info::starts last frame
     bool wasInSession = false;
 };
@@ -135,6 +142,46 @@ void ShowCompatBanner() {
                  mod + " " + ver + " was not made for this game version" + found + ". Co-op may not work correctly.",
                  true, kCompatToastSeconds);
     }
+}
+
+std::string EnvValue(const char* key) {
+    char buf[512];
+    const DWORD n = GetEnvironmentVariableA(core::EnvName(key).c_str(), buf, sizeof buf);
+    return n > 0 && n < sizeof buf ? std::string(buf, n) : std::string();
+}
+
+// Every frame: on the first, start the update check (its own thread, core/update_check.h); once it found a newer
+// release, tell the player when the main menu is up (not over the title, a loading screen or the world).
+void TickUpdateCheck() {
+    UiState& u = U();
+    const GameInfo& gi = GetGameInfo();
+    if (u.updateDone || !gi.updateId || !*gi.updateId) return;
+    if (!u.updateStarted) {
+        u.updateStarted = true;
+        u.updateCurrent = gi.modVersion;
+        std::string url = std::string(core::update::kDefaultUrl) + gi.updateId;
+        if (std::string as = EnvValue("UPDATE_AS"); !as.empty()) {  // testing: pretend to be another version
+            MC_LOG_INFO("update check: checking as version %s (%sUPDATE_AS)", as.c_str(), gi.envPrefix);
+            u.updateCurrent = std::move(as);
+        }
+        if (std::string other = EnvValue("UPDATE_URL"); !other.empty()) url = std::move(other);
+        MC_LOG_INFO("update check: asking %s (this is %s)", url.c_str(), u.updateCurrent.c_str());
+        core::update::Start(url, u.updateCurrent);
+        return;
+    }
+    std::string latest;
+    switch (core::update::Poll(&latest)) {
+    case core::update::State::NewerAvailable: break;
+    case core::update::State::Idle:
+    case core::update::State::Running: return;
+    default: u.updateDone = true; return;  // up to date, or not checked this time (logged)
+    }
+    u.updateLatest = latest;
+    GameModule& game = GetGameModule();
+    if (!game.LobbyCanOpen() || game.InWorld()) return;  // wait for the main menu
+    u.updateDone = true;
+    AddToast("Update available", core::update::NoticeText(gi.modName, latest, u.updateCurrent), false,
+             kUpdateToastSeconds);
 }
 
 // ---- panels -------------------------------------------------------------------------------------------------------
@@ -1336,7 +1383,8 @@ void DrawSettings(render::DrawList& d, float W, float H, float s) {
     BuildSettingsItems();
     d.Rect(0, 0, W, H, kShade);
     const float w = 680 * s, x = (W - w) * 0.5f, pad = 36 * s;
-    const float h = 70 * s + 40 * s + static_cast<float>(u.items.size()) * 46 * s + 90 * s;
+    const bool update = !u.updateLatest.empty();
+    const float h = 70 * s + 40 * s + (update ? 32 * s : 0) + static_cast<float>(u.items.size()) * 46 * s + 90 * s;
     const float top = std::max(20 * s, (H - h) * 0.35f);
     d.RectH(x, top, w, h, kPanelBg, 0xD8121110);
     d.Rect(x, top, w, 2 * s, kGoldDim);
@@ -1345,6 +1393,12 @@ void DrawSettings(render::DrawList& d, float W, float H, float s) {
     y += 62 * s;
     d.Text(x + pad, y, "SAVED IN " + Upper(std::string(GetGameInfo().modName)) + ".INI", 21 * s, kTextDim);
     y += 40 * s;
+    if (update) {  // the update check found a newer release (TickUpdateCheck)
+        std::string line = "UPDATE AVAILABLE: " + Upper(core::update::Display(u.updateLatest));
+        line += " AT JUSTADDMP.COM";
+        d.Text(x + pad, y - 8 * s, line, 21 * s, kGold);
+        y += 32 * s;
+    }
     DrawItems(d, x + pad - 16 * s, y, w - pad * 2 + 16 * s, s);
     y += 30 * s;
     DrawPrompts(d, x + pad, y, 22 * s, w - pad * 2);
@@ -1407,6 +1461,7 @@ void CoopUi::Tick(float dt) {
         u.compatChecked = true;
         ShowCompatBanner();
     }
+    TickUpdateCheck();
     u.info = Coop::GetInfo();
     // The session ended (left, kicked, the host left): a lobby of that session has nothing left to show.
     const bool inSession = u.info.phase != Coop::Phase::Idle;

@@ -38,6 +38,11 @@ struct GameInfo {
     const wchar_t* proxyBuiltName;   // "mafiacoop_proxy.dll": file name in the build output
     const wchar_t* proxyPointerName; // "mafiacoop_path.txt": next to the installed proxy, holds the dll's path
     const char* proxyMarker;         // bytes that identify our proxy file (install/uninstall never touch others)
+
+    // ---- update check (core 0.13; core/update_check.h) ----
+    // The mod's id at https://justaddmp.com/api/version/<id>, e.g. "mafia-de". Once per game start the dll asks it
+    // for the newest release and shows a notice at the main menu when it is newer than modVersion. nullptr: no check.
+    const char* updateId = nullptr;
 };
 
 const GameInfo& GetGameInfo();  // defined by the game repo

@@ -32,7 +32,9 @@ include/mc/
 src/
   core/                   log, crash (minidump + log on unhandled exception), hook (MinHook wrapper), config (ini +
                           <envPrefix>KEY overrides; Set() saves a value back into the ini), mem (module info, pattern scan, RIP-relative resolve), compat
-                          (features missing on this game build -> banner), names.h (env/kernel names from GameInfo)
+                          (features missing on this game build -> banner), names.h (env/kernel names from GameInfo),
+                          update_check (asks justaddmp.com/api/version/<GameInfo::updateId> once per game start on its
+                          own thread; a newer release -> a notice at the main menu)
   net/                    transport.h (interface), udp_transport (own reliability), steam_transport (ISteamNetworking
                           P2P, flat API), multi_transport, steam_flat (bindings), steam_lobby, session (host-
                           authoritative star, relay, password, kick/ban, reconnect after a lost connection), wire (byte writer/reader), auth (BCrypt HMAC),
@@ -65,7 +67,7 @@ src/
   proxy/                  version.dll proxy: forwards the 17 exports to System32's version.dll, loads the mod dll in
                           the game exe only ("start from Steam")
 tests/                    net_loopback, net_password, net_kick, net_reconnect, net_lobby, net_interest, net_motion, net_replica, net_fuzz, proxy_test,
-                          pending_join, crash_dump, launcher_args, config_set, test_input, steam_smoke (manual)
+                          update_check, pending_join, crash_dump, launcher_args, config_set, test_input, steam_smoke (manual)
   support/                test_game_info.cpp (a made-up game), test_module.cpp (a game module that does nothing)
 tools/                    msvc.cmd, embed_lua.ps1 (embed a .lua into a header), fontgen.cpp, crashinfo.py
 docs/                     ARCHITECTURE.md (this), protocol.md (sessions + transports), interest.md, replication.md (how a

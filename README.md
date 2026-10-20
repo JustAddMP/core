@@ -69,6 +69,8 @@ out\config_set.exe           Config::Set saves a value into the ini (only that l
                              GetFileString ignores launch overrides
 out\test_input.exe           test input script parser (virtual pad presses, mouse, keys for the co-op panels)
 out\proxy_test.exe           version.dll proxy + launcher --install/--uninstall against a fake game folder
+out\update_check.exe         update check: version parsing and comparison (pre-releases, malformed input), the
+                             endpoint's answer, fetch failures and one check against a stand-in server on 127.0.0.1
 out\steam_smoke.exe <copy of steam_api64.dll>    manual: needs Steam running (app 480, Spacewar)
 ```
 
