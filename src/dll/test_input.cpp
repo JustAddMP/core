@@ -63,6 +63,10 @@ void Run(const test_input::Command& c) {
     case C::Wait:
         s.waitLeft = c.ms / 1000.0;
         break;
+    case C::Text:
+        for (char ch : c.text) ui_input::InjectEvent({ui_input::Event::Char, static_cast<uint32_t>(ch), 0, 0});
+        MC_LOG_INFO("test_input: text '%s'", c.text.c_str());
+        break;
     case C::Dump: {
         std::stringstream ss(CoopUi::Describe());
         std::string line;

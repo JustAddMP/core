@@ -6,6 +6,7 @@
 //   pad <buttons> [ms]   hold virtual pad buttons (XInput) for ms (default 150), then release
 //                        buttons: names joined with '+' (A B X Y START BACK UP DOWN LEFT RIGHT LB RB LS RS) or hex
 //   key <vk>             a key press for our panels (VK_* in hex, e.g. 0x28 = Down, 0x0D = Enter, 0x1B = Esc)
+//   text <chars>         typed characters for our panels' text boxes (printable ASCII, up to 64; e.g. an IP)
 //   move <x> <y>         mouse move to (x, y)
 //   click <x> <y>        left click at (x, y) (a move there first)
 //   wheel <+1|-1>        mouse wheel
@@ -23,12 +24,12 @@
 namespace mc::test_input {
 
 struct Command {
-    enum Type { Pad, Key, Move, Click, Wheel, Wait, Dump, Log, Open } type = Log;
+    enum Type { Pad, Key, Move, Click, Wheel, Wait, Dump, Log, Open, Text } type = Log;
     uint16_t buttons = 0;  // Pad
     uint32_t ms = 0;       // Pad: hold time; Wait: pause
     uint32_t code = 0;     // Key: virtual key; Wheel: 1 = up, 0xFFFFFFFF = down
     float x = 0, y = 0;    // Move, Click
-    std::string text;      // Log: the text; Open: the panel
+    std::string text;      // Log: the text; Open: the panel; Text: the characters
 };
 
 inline bool ParseButtons(const std::string& s, uint16_t* out) {
@@ -140,6 +141,18 @@ inline std::vector<Command> Parse(const std::string& text, std::vector<std::stri
             if (!(ls >> c.text) || (c.text != "pause" && c.text != "lobby" && c.text != "settings" &&
                                     c.text != "joinip" && c.text != "friends")) {
                 bad("open: pause, lobby, settings, joinip or friends");
+                continue;
+            }
+        } else if (cmd == "text") {
+            c.type = Command::Text;
+            if (!(ls >> c.text) || c.text.size() > 64) {
+                bad("text: 1-64 characters, no spaces");
+                continue;
+            }
+            bool ok = true;
+            for (char ch : c.text) ok = ok && ch > 32 && ch < 127;
+            if (!ok) {
+                bad("text: printable ASCII only");
                 continue;
             }
         } else if (cmd == "dump") {

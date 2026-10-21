@@ -67,6 +67,13 @@ int main() {
     Check(errors.empty() && o.size() == 5 && o[4].type == Command::Open && o[4].text == "friends",
           "open: pause, lobby, settings, joinip, friends", std::to_string(errors.size()) + " errors");
 
+    {  // text: typed characters for a text box (the one-PC rejoin types the host's IP into JOIN BY IP)
+        std::vector<std::string> e2;
+        const auto t = Parse("text 127.0.0.1\ntext\ntext a\x01" "b\n", &e2);
+        Check(t.size() == 1 && t[0].type == Command::Text && t[0].text == "127.0.0.1" && e2.size() == 2,
+              "text 127.0.0.1; empty and control characters rejected", std::to_string(e2.size()) + " errors");
+    }
+
     // every button name
     uint16_t all = 0;
     Check(mc::test_input::ParseButtons("UP+DOWN+LEFT+RIGHT+START+BACK+LS+RS+LB+RB+A+B+X+Y", &all) && all == 0xF3FF,
