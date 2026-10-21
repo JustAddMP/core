@@ -3,15 +3,14 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
-## Unreleased (feat/fix-0172)
+## v0.14.1 — 2026-10-21
+
+One-PC test tools and a test input, additive: game repos keep building without changes. The wire protocol stays
+9 (no new messages). Used for the one-PC checks of MafiaCoop 0.17.1 (two instances over UDP with `--net-sim`,
+the windows placed with `--window-area`, the rejoin typing the host's IP); not yet between two PCs or over Steam.
 
 - Test input: `text <chars>` types characters into our panels' text boxes (the one-PC rejoin types the host's IP
   into JOIN BY IP); tests/test_input.cpp.
-
-## Unreleased (feat/fix-0171)
-
-One-PC test tools, additive (game repos build unchanged; protocol stays 9):
-
 - `net/net_sim.h`: `--net-sim latency=12,jitter=3,loss=0,dup=0` (ini `net_sim`, any section): the UDP transport
   delays (drops, duplicates) what this game sends (`UdpOptions::sim*`, seeded per process); never Steam P2P. Logged
   loudly at the transport start and in the session start block, `SES part=netsim on latency jitter loss dup udp value`.
@@ -20,6 +19,8 @@ One-PC test tools, additive (game repos build unchanged; protocol stays 9):
   through its CreateWindowExW / A import is made at x0 (y), no wider than the area (an import table patch from the
   init thread right after hook::Init: a MinHook detour suspends every thread and delayed the game's own hooks).
 - launcher: `net_sim` and `window_area` take a value.
+- Tests: `net_sim` (new), `test_input` (`text`); `session_log` runs 11.5 s for its two SCK records (10.6 s left one
+  out about 1 run in 7).
 
 ## v0.14.0 — 2026-10-20
 

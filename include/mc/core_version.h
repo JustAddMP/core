@@ -5,7 +5,7 @@ namespace mc {
 
 constexpr int kCoreVersionMajor = 0;
 constexpr int kCoreVersionMinor = 14;
-constexpr int kCoreVersionPatch = 0;
-constexpr const char* kCoreVersion = "0.14.0";
+constexpr int kCoreVersionPatch = 1;
+constexpr const char* kCoreVersion = "0.14.1";
 
 } // namespace mc
