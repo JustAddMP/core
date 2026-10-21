@@ -3,6 +3,11 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## Unreleased (feat/fix-0172)
+
+- Test input: `text <chars>` types characters into our panels' text boxes (the one-PC rejoin types the host's IP
+  into JOIN BY IP); tests/test_input.cpp.
+
 ## Unreleased (feat/fix-0171)
 
 One-PC test tools, additive (game repos build unchanged; protocol stays 9):
