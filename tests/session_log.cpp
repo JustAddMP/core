@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
     mc::core::diag::Add("test.snaps", 2);
     const double t0 = Seconds();
     double last = t0;
-    while (Seconds() - t0 < 10.6) {
+    while (Seconds() - t0 < 11.5) {  // SCK at 5 and 10 s (10.6 s left one out about 1 run in 7 on a busy PC)
         host.Poll();
         guest.Poll();
         host.Broadcast(0x0100, std::vector<uint8_t>(40, 1), mc::net::Reliability::Unreliable);
