@@ -23,10 +23,12 @@ inline constexpr const wchar_t* kValueKeys[] = {
     L"log",               // log tag
     L"model",             // character the player appears as
     L"name",              // player name
+    L"net_sim",           // test tool: latency=12,jitter=3,loss=0,dup=0 (net/net_sim.h)
     L"password",          // session password
     L"port",              // UDP port
     L"transport",         // udp | steam
     L"window",            // left | right
+    L"window_area",       // test tool: x0,x1[,y] (dll/window_place.h)
     L"window_timeout_s",  // seconds to wait for the game window
 };
 

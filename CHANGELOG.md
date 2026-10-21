@@ -3,6 +3,19 @@
 All notable changes to JustAddMP core. Versions follow MAJOR.MINOR.PATCH (see README.md "Versions"); each release
 is a git tag `vX.Y.Z`. Breaking changes for game repos are marked **Breaking**.
 
+## Unreleased (feat/fix-0171)
+
+One-PC test tools, additive (game repos build unchanged; protocol stays 9):
+
+- `net/net_sim.h`: `--net-sim latency=12,jitter=3,loss=0,dup=0` (ini `net_sim`, any section): the UDP transport
+  delays (drops, duplicates) what this game sends (`UdpOptions::sim*`, seeded per process); never Steam P2P. Logged
+  loudly at the transport start and in the session start block, `SES part=netsim on latency jitter loss dup udp value`.
+  `tests/net_sim.cpp`: parsing, the launcher passing it on, two transports on loopback at 23 ms round trip.
+- `dll/window_place.h`: `--window-area x0,x1[,y]` (ini `window_area`): every top-level window the game creates
+  through its CreateWindowExW / A import is made at x0 (y), no wider than the area (an import table patch from the
+  init thread right after hook::Init: a MinHook detour suspends every thread and delayed the game's own hooks).
+- launcher: `net_sim` and `window_area` take a value.
+
 ## v0.14.0 — 2026-10-20
 
 Session diagnostics for two-PC tests: everything about a co-op session in the main log, the sync trace and one zip per

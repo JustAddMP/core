@@ -14,6 +14,7 @@
 #include "net/steam_friends.h"
 #include "net/steam_lobby.h"
 #include "net/steam_transport.h"
+#include "net/net_sim.h"
 #include "net/udp_transport.h"
 
 #include <winsock2.h>
@@ -195,6 +196,19 @@ net::UdpOptions UdpOpts() {
     net::UdpOptions o;
     o.defaultPort = GetGameInfo().defaultPort;  // "join <ip>" without a port
     o.timeoutS = TimeoutS("net_timeout_s", 4);
+    // Test tool (net/net_sim.h): net_sim = latency=12,jitter=3,... delays what we send over UDP (never Steam P2P)
+    const std::string text = core::Config::Get().GetString("net_sim");
+    net::NetSim sim;
+    std::string err;
+    if (!net::ParseNetSim(text, sim, &err)) {
+        MC_LOG_WARN("net: net_sim '%s' not understood (%s): NO simulated lag", text.c_str(), err.c_str());
+    } else if (sim.On()) {
+        net::ApplyNetSim(sim, o);
+        o.simSeed = GetCurrentProcessId();
+        MC_LOG_WARN("net: SIMULATED LAG ON (a test tool, net_sim = %s): every datagram this game sends over UDP waits "
+                    "%.1f ms +- %.1f ms, %.1f %% dropped, %.1f %% sent twice (Steam P2P never)",
+                    net::NetSimText(sim).c_str(), sim.latencyMs, sim.jitterMs, sim.lossPct, sim.dupPct);
+    }
     return o;
 }
 

@@ -11,6 +11,7 @@
 #include "mc/core_version.h"
 #include "mc/game_info.h"
 #include "mc/game_module.h"
+#include "net/net_sim.h"
 #include "net/session.h"
 #include "render/present_hook.h"
 
@@ -354,6 +355,23 @@ void StartSession(State& s, const std::wstring& path) {
                 ctx.lanAddress.empty() ? "-" : ctx.lanAddress.c_str(), static_cast<unsigned long long>(ctx.lobbyId),
                 ctx.relayKBs, ctx.password ? "set" : "none", ctx.target.empty() ? "" : ", target ",
                 ctx.target.c_str());
+    {
+        // the test tool's simulated lag (net/net_sim.h): in the header so a report never mistakes it for the link
+        net::NetSim sim;
+        const std::string text = core::Config::Get().GetString("net_sim");
+        const bool ok = net::ParseNetSim(text, sim);
+        const bool udp = ctx.transport != "steam";
+        const bool on = ok && sim.On() && udp;
+        Ses("part=netsim on=%d latency=%.1f jitter=%.1f loss=%.2f dup=%.2f udp=%d value=%s", on ? 1 : 0,
+            ok ? sim.latencyMs : 0.0f, ok ? sim.jitterMs : 0.0f, ok ? sim.lossPct : 0.0f, ok ? sim.dupPct : 0.0f,
+            udp ? 1 : 0, Token(text.empty() ? std::string("-") : text).c_str());
+        if (on)
+            MC_LOG_WARN("session: SIMULATED LAG ON (test tool, net_sim = %s): what this game sends over UDP waits "
+                        "%.1f ms +- %.1f ms one way (%.1f %% lost, %.1f %% duplicated)",
+                        net::NetSimText(sim).c_str(), sim.latencyMs, sim.jitterMs, sim.lossPct, sim.dupPct);
+        else if (!text.empty() && !ok)
+            MC_LOG_WARN("session: net_sim '%s' not understood: no simulated lag", text.c_str());
+    }
     WriteWindow();
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;

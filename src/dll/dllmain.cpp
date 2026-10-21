@@ -154,12 +154,14 @@ DWORD WINAPI InitThread(LPVOID) {
     } else {
         MC_LOG_INFO("config: %s not found, using defaults", Narrow(cfg.Path()).c_str());
     }
-    for (const char* key : {"host", "join", "join_lobby", "transport", "name", "port", "log", "steam", "window"}) {
+    for (const char* key : {"host", "join", "join_lobby", "transport", "name", "port", "log", "steam", "window",
+                            "window_area", "net_sim"}) {
         if (cfg.Has(key)) MC_LOG_INFO("config: %s = %s", key, cfg.GetString(key).c_str());
     }
 
     core::crash::Install(dir + L"\\logs");
     if (!core::hook::Init()) return 1;
+    window_place::EarlyInit();  // test tool window_area: before the game makes its first window
     // The game layer's hooks (script bridge, menus, ...): independent of the window/D3D. Failures only disable
     // features (reported to core::compat).
     GetGameModule().Init(dir, cfg.GetString("log"));
